@@ -7,13 +7,8 @@ import { createClient } from '@/lib/supabase/client'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import * as z from 'zod'
-import { Loader2 } from 'lucide-react'
+import { Loader2, Eye, EyeOff } from 'lucide-react'
 import { toast } from 'sonner'
-
-import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
 
 const loginSchema = z.object({
   email: z.string().email({ message: 'Invalid email address' }),
@@ -24,6 +19,7 @@ export default function LoginPage() {
   const router = useRouter()
   const supabase = createClient()
   const [isLoading, setIsLoading] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
 
   const { register, handleSubmit, formState: { errors } } = useForm<z.infer<typeof loginSchema>>({
     resolver: zodResolver(loginSchema),
@@ -58,57 +54,103 @@ export default function LoginPage() {
   }
 
   return (
-    <Card className="w-full max-w-md glass-card border-none">
-      <CardHeader className="space-y-1">
-        <CardTitle className="text-2xl font-bold tracking-tight text-center">
-          Welcome back
-        </CardTitle>
-        <CardDescription className="text-center text-white/70">
-          Enter your email to sign in to your account
-        </CardDescription>
-      </CardHeader>
-      <form onSubmit={handleSubmit(onSubmit)}>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="email">Email</Label>
-            <Input 
-              id="email" 
-              type="email" 
-              placeholder="m@example.com" 
-              className="bg-white/10 border-white/20 focus:border-white/40"
+    <div className="w-full max-w-[420px] mx-auto">
+      {/* Logo */}
+      <div className="flex justify-center mb-6">
+        <div className="w-12 h-12 rounded-xl bg-[#4361ee] flex items-center justify-center shadow-md">
+          <span className="text-white font-bold text-xl tracking-tight">A</span>
+        </div>
+      </div>
+
+      {/* Heading */}
+      <h1 className="text-[28px] font-bold text-[#1a1a2e] text-center mb-1">
+        Welcome back!
+      </h1>
+      <p className="text-[#6b7280] text-sm text-center mb-8">
+        Don&apos;t have an account yet?{' '}
+        <Link href="/register" className="text-[#4361ee] hover:underline font-medium">
+          Sign up now
+        </Link>
+      </p>
+
+      {/* Form */}
+      <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
+        {/* Email */}
+        <div>
+          <div className="relative">
+            <input
+              id="login-email"
+              type="email"
+              placeholder="Email address"
+              autoComplete="email"
+              className="w-full h-[52px] px-4 rounded-xl border border-[#d1d5db] bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee] transition-all"
               {...register('email')}
             />
-            {errors.email && <p className="text-sm text-destructive">{errors.email.message}</p>}
           </div>
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label htmlFor="password">Password</Label>
-              <Link href="/forgot-password" className="text-sm text-primary hover:underline">
-                Forgot password?
-              </Link>
-            </div>
-            <Input 
-              id="password" 
-              type="password" 
-              className="bg-white/10 border-white/20 focus:border-white/40"
+          {errors.email && <p className="text-xs text-red-500 mt-1.5 ml-1">{errors.email.message}</p>}
+        </div>
+
+        {/* Password */}
+        <div>
+          <div className="relative">
+            <input
+              id="login-password"
+              type={showPassword ? 'text' : 'password'}
+              placeholder="Password"
+              autoComplete="current-password"
+              className="w-full h-[52px] px-4 pr-12 rounded-xl border border-[#d1d5db] bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee] transition-all"
               {...register('password')}
             />
-            {errors.password && <p className="text-sm text-destructive">{errors.password.message}</p>}
+            <button
+              type="button"
+              onClick={() => setShowPassword(!showPassword)}
+              className="absolute right-4 top-1/2 -translate-y-1/2 text-[#9ca3af] hover:text-[#6b7280] transition-colors"
+              aria-label={showPassword ? 'Hide password' : 'Show password'}
+            >
+              {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+            </button>
           </div>
-        </CardContent>
-        <CardFooter className="flex flex-col space-y-4">
-          <Button type="submit" className="w-full bg-white text-black hover:bg-white/90" disabled={isLoading}>
-            {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            {isLoading ? 'Signing in...' : 'Sign in'}
-          </Button>
-          <div className="text-center text-sm text-white/70">
-            Don&apos;t have an account?{' '}
-            <Link href="/register" className="text-white hover:underline font-semibold">
-              Sign up
-            </Link>
-          </div>
-        </CardFooter>
+          {errors.password && <p className="text-xs text-red-500 mt-1.5 ml-1">{errors.password.message}</p>}
+        </div>
+
+        {/* Remember me + Forgot password */}
+        <div className="flex items-center justify-between">
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              className="w-4 h-4 rounded border-[#d1d5db] text-[#4361ee] focus:ring-[#4361ee]/30 accent-[#4361ee]"
+            />
+            <span className="text-sm text-[#374151]">Remember me</span>
+          </label>
+          <Link href="/forgot-password" className="text-sm text-[#4361ee] hover:underline font-medium">
+            Forgot password?
+          </Link>
+        </div>
+
+        {/* Submit button */}
+        <button
+          type="submit"
+          disabled={isLoading}
+          className="w-full h-[48px] rounded-full bg-[#4361ee] text-white text-sm font-semibold hover:bg-[#3a56d4] active:scale-[0.98] disabled:opacity-60 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2 shadow-lg shadow-[#4361ee]/25"
+        >
+          {isLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+          {isLoading ? 'Signing in...' : 'Log in'}
+        </button>
+
+        {/* Divider */}
+        <div className="flex items-center gap-3">
+          <div className="flex-1 h-px bg-[#e5e7eb]" />
+          <span className="text-xs text-[#9ca3af] uppercase tracking-wider font-medium">or</span>
+          <div className="flex-1 h-px bg-[#e5e7eb]" />
+        </div>
+
+        {/* SSO Link */}
+        <div className="text-center">
+          <Link href="/sso" className="text-sm text-[#4361ee] hover:underline font-medium">
+            Log in with SSO
+          </Link>
+        </div>
       </form>
-    </Card>
+    </div>
   )
 }
