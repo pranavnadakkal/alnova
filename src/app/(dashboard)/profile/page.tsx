@@ -23,6 +23,8 @@ const profileSchema = z.object({
   industry: z.string().min(2, { message: 'Industry is required' }),
   tech_skills: z.string().min(2, { message: 'Please add some skills (comma separated)' }),
   linkedin_url: z.string().url({ message: 'Must be a valid URL' }).optional().or(z.literal('')),
+  graduation_year: z.coerce.number().min(1950, { message: 'Invalid year' }).max(2030, { message: 'Invalid year' }).optional(),
+  target_roles: z.string().optional(),
 })
 
 export default function ProfilePage() {
@@ -73,6 +75,8 @@ export default function ProfilePage() {
           industry: profile.industry || '',
           tech_skills: profile.tech_skills?.join(', ') || '',
           linkedin_url: profile.linkedin_url || '',
+          graduation_year: profile.graduation_year || undefined,
+          target_roles: profile.target_roles?.join(', ') || '',
         })
       }
       setIsFetching(false)
@@ -88,6 +92,7 @@ export default function ProfilePage() {
     setError(null)
     
     const skillsArray = data.tech_skills.split(',').map(s => s.trim()).filter(Boolean)
+    const targetRolesArray = data.target_roles ? data.target_roles.split(',').map(s => s.trim()).filter(Boolean) : []
 
     const { error: profileError } = await supabase
       .from('profiles')
@@ -98,7 +103,9 @@ export default function ProfilePage() {
         role: data.job_role,
         industry: data.industry,
         tech_skills: skillsArray,
-        linkedin_url: data.linkedin_url || null
+        linkedin_url: data.linkedin_url || null,
+        graduation_year: data.graduation_year || null,
+        target_roles: targetRolesArray.length > 0 ? targetRolesArray : null,
       })
       .eq('user_id', userId)
 
@@ -203,7 +210,31 @@ export default function ProfilePage() {
                   />
                 </div>
               )}
+
+              {userType === 'student' && (
+                <div className="space-y-2">
+                  <Label htmlFor="graduation_year">Graduation Year</Label>
+                  <Input 
+                    id="graduation_year" 
+                    type="number"
+                    className="bg-white/10 border-white/20 focus:border-white/40"
+                    {...register('graduation_year')}
+                  />
+                  {errors.graduation_year && <p className="text-sm text-destructive">{errors.graduation_year.message}</p>}
+                </div>
+              )}
             </div>
+
+            {userType === 'student' && (
+              <div className="space-y-2">
+                <Label htmlFor="target_roles">Target Roles (comma separated)</Label>
+                <Input 
+                  id="target_roles" 
+                  className="bg-white/10 border-white/20 focus:border-white/40"
+                  {...register('target_roles')}
+                />
+              </div>
+            )}
 
             <div className="space-y-2">
               <Label htmlFor="industry">Industry</Label>
