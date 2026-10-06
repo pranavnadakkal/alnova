@@ -42,14 +42,14 @@ export default function LoginPage() {
     toast.success('Successfully logged in!')
     const { data: { user } } = await supabase.auth.getUser()
     if (user) {
-      const { data: profile } = await supabase.from('profiles').select('user_id').eq('user_id', user.id).single()
+      const { data: profile } = await supabase.from('profiles').select('user_id, role').eq('user_id', user.id).single()
       if (!profile) {
         router.push('/onboarding')
       } else {
-        router.push('/dashboard')
+        router.push(profile.role === 'alumni' ? '/alumni-dashboard' : '/student-dashboard')
       }
     } else {
-      router.push('/dashboard')
+      router.push('/student-dashboard')
     }
   }
 

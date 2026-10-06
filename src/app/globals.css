@@ -123,13 +123,6 @@
   }
   body {
     @apply bg-background text-foreground;
-    /* Vibrant gradient background for Glassmorphism base */
-    background: linear-gradient(135deg, oklch(0.95 0.05 250), oklch(0.95 0.05 320));
-    background-attachment: fixed;
-  }
-  .dark body {
-    background: linear-gradient(135deg, oklch(0.15 0.05 250), oklch(0.1 0.05 320));
-    background-attachment: fixed;
   }
   html,
   body {
@@ -143,5 +136,14 @@
   }
   .glass-card {
     @apply bg-white/20 dark:bg-black/20 backdrop-blur-lg border border-white/20 dark:border-white/10 shadow-xl rounded-xl;
+  }
+  /* Auth page gradient background */
+  .auth-gradient {
+    background: linear-gradient(135deg, oklch(0.95 0.05 250), oklch(0.95 0.05 320));
+    background-attachment: fixed;
+  }
+  .dark .auth-gradient {
+    background: linear-gradient(135deg, oklch(0.15 0.05 250), oklch(0.1 0.05 320));
+    background-attachment: fixed;
   }
 }

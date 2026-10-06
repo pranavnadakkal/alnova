@@ -3,6 +3,7 @@ export type UserRole = 'student' | 'alumni' | 'admin'
 export interface Profile {
   user_id: string
   full_name: string
+  avatar_url?: string
   bio?: string
   company?: string
   role?: string

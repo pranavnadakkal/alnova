@@ -17,3 +17,4 @@ export default function GlobalError({ error, retry }: { error: Error & { digest?
     </html>
   )
 }
+

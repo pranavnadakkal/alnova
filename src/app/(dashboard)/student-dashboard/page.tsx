@@ -1,9 +1,8 @@
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 import StudentDashboard from '@/components/dashboard/StudentDashboard'
-import AlumniDashboard from '@/components/dashboard/AlumniDashboard'
 
-export default async function DashboardIndex() {
+export default async function StudentDashboardPage() {
   const supabase = await createClient()
 
   const { data: { user } } = await supabase.auth.getUser()
@@ -23,25 +22,22 @@ export default async function DashboardIndex() {
     redirect('/onboarding')
   }
 
-  const isStudent = profile.role?.toLowerCase() === 'student' || profile.role === null
+  if (profile.role?.toLowerCase() === 'alumni') {
+    redirect('/alumni-dashboard')
+  }
 
   // Fetch connection requests for stats and recent activity
-  const idColumn = isStudent ? 'student_id' : 'alumni_id'
-  
   const { data: requests } = await supabase
-    .from('connection_requests')
+    .from('requests')
     .select(`
       *,
-      student:profiles!student_id(full_name, role, company),
       alumni:profiles!alumni_id(full_name, role, company)
     `)
-    .eq(idColumn, user.id)
+    .eq('student_id', user.id)
     .order('created_at', { ascending: false })
     .limit(5)
 
-  return isStudent ? (
+  return (
     <StudentDashboard profile={profile} requests={requests || []} />
-  ) : (
-    <AlumniDashboard profile={profile} requests={requests || []} />
   )
 }

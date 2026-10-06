@@ -57,9 +57,9 @@ export default function OnboardingPage() {
       }
       setUserId(user.id)
 
-      const { data: profile } = await supabase.from('profiles').select('user_id').eq('user_id', user.id).single()
+      const { data: profile } = await supabase.from('profiles').select('user_id, role').eq('user_id', user.id).single()
       if (profile) {
-        router.push('/dashboard')
+        router.push(profile.role === 'alumni' ? '/alumni-dashboard' : '/student-dashboard')
       }
     }
     checkUser()
@@ -131,7 +131,7 @@ export default function OnboardingPage() {
     }
 
     toast.success('Profile created successfully!')
-    router.push('/dashboard')
+    router.push(data.role === 'alumni' ? '/alumni-dashboard' : '/student-dashboard')
   }
 
   const stepLabels = ['Role', 'Details', 'Skills']
