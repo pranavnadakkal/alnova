@@ -42,6 +42,7 @@ export default function DirectoryPage() {
   const [selectedAlumniId, setSelectedAlumniId] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [requestType, setRequestType] = useState<'mentorship' | 'referral'>('mentorship')
+  const [myRequests, setMyRequests] = useState<ConnectionRequest[]>([])
 
   // Alumni-specific state (student directory)
   const [connectedStudents, setConnectedStudents] = useState<ConnectedStudent[]>([])
@@ -49,6 +50,11 @@ export default function DirectoryPage() {
   const [filterType, setFilterType] = useState<'all' | 'mentorship' | 'referral' | 'resume'>('all')
   const [selectedStudent, setSelectedStudent] = useState<ConnectedStudent | null>(null)
   const [profileDialogOpen, setProfileDialogOpen] = useState(false)
+
+  // Helper to get student's request status for a specific alumni
+  const getRequestForAlumni = (alumniId: string, type: 'mentorship' | 'referral') => {
+    return myRequests.find((r) => r.alumni_id === alumniId && r.type === type)
+  }
 
   useEffect(() => {
     const fetchData = async () => {
@@ -69,10 +75,21 @@ export default function DirectoryPage() {
           .eq('id', user.id)
           .single()
 
-        if (userError) throw userError
-        setUserRole(userData.role)
+        let currentRole = userData?.role as 'student' | 'alumni' | undefined
+        let { data: profileRole } = await supabase
+            .from('profiles')
+            .select('role')
+            .eq('id', user.id)
+            .maybeSingle()
+        if (!profileRole) {
+            profileRole = (await supabase.from('profiles').select('role').eq('user_id', user.id).maybeSingle()).data
+        }
+        if (profileRole?.role === 'alumni') currentRole = 'alumni'
+        if (profileRole?.role === 'student') currentRole = 'student'
+        if (!currentRole) throw userError || new Error('Your account role is not set.')
+        setUserRole(currentRole)
 
-        if (userData.role === 'student') {
+        if (currentRole === 'student') {
           // Fetch alumni directory for students
           const { data: users, error: usersError } = await supabase
             .from('users')
@@ -82,30 +99,58 @@ export default function DirectoryPage() {
           if (usersError) throw usersError
           if (users && users.length > 0) {
             const alumniIds = users.map((u) => u.id)
-            const { data: profiles, error: profilesError } = await supabase
+            let { data: profiles, error: profilesError } = await supabase
               .from('profiles')
               .select('*')
-              .in('user_id', alumniIds)
+              .in('id', alumniIds)
+            if (!profiles?.length && !profilesError) {
+              const fallback = await supabase.from('profiles').select('*').in('user_id', alumniIds)
+              profiles = fallback.data
+              profilesError = fallback.error
+            }
 
             if (profilesError) throw profilesError
             if (profiles) setAlumni(profiles)
           }
-        } else if (userData.role === 'alumni') {
+
+          // Fetch student's existing connection requests
+          const { data: existingRequests, error: existingRequestsError } = await supabase
+            .from('requests')
+            .select('*')
+            .eq('student_id', user.id)
+
+          if (existingRequestsError) throw existingRequestsError
+          if (existingRequests) setMyRequests(existingRequests)
+        } else if (currentRole === 'alumni') {
           // Fetch connected students for alumni
-          const { data: requests, error: requestsError } = await supabase
+          let { data: requests, error: requestsError } = await supabase
             .from('requests')
             .select('*')
             .eq('alumni_id', user.id)
             .in('status', ['accepted', 'completed', 'reviewing', 'referred', 'pending'])
 
+          if (requestsError?.message.includes('requests.status')) {
+            const fallback = await supabase
+              .from('requests')
+              .select('*')
+              .eq('alumni_id', user.id)
+            requests = fallback.data
+            requestsError = fallback.error
+          }
+
           if (requestsError) throw requestsError
 
           if (requests && requests.length > 0) {
             const studentIds = [...new Set(requests.map((r: ConnectionRequest) => r.student_id))]
-            const { data: profiles, error: profilesError } = await supabase
+            let { data: profiles, error: profilesError } = await supabase
               .from('profiles')
               .select('*')
-              .in('user_id', studentIds)
+              .in('id', studentIds)
+            if (!profiles?.length && !profilesError) {
+              const fallback = await supabase.from('profiles').select('*').in('user_id', studentIds)
+              profiles = fallback.data
+              profilesError = fallback.error
+            }
 
             if (profilesError) throw profilesError
 
@@ -130,7 +175,11 @@ export default function DirectoryPage() {
           }
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unable to load the directory.'
+        const message = error instanceof Error
+          ? error.message
+          : (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+            ? error.message
+            : 'Unable to load the directory.')
         setLoadError(message)
         toast.error('Could not load the directory', { description: message })
       } finally {
@@ -147,22 +196,70 @@ export default function DirectoryPage() {
       toast.error('Please sign in before sending a request.')
       return
     }
+
+    // Check existing request in local state
+    const existingReq = getRequestForAlumni(selectedAlumniId, requestType)
+    if (existingReq?.status === 'pending') {
+      toast.error(`A ${requestType} request is already pending for this alumni.`)
+      return
+    }
+    if (existingReq?.status === 'accepted') {
+      toast.info(`${requestType === 'mentorship' ? 'Mentorship' : 'Referral'} has already been given/accepted with this alumni.`)
+      return
+    }
+
     setIsSubmitting(true)
 
-    const { error } = await supabase.from('requests').insert({
-      student_id: userId,
-      alumni_id: selectedAlumniId,
-      type: requestType,
-      message: requestMessage,
-      status: 'pending'
-    })
+    // Check with backend to prevent double-submit or stale state
+    const { data: existingDbReq } = await supabase
+      .from('requests')
+      .select('id, status, type')
+      .eq('student_id', userId)
+      .eq('alumni_id', selectedAlumniId)
+      .eq('type', requestType)
+      .in('status', ['pending', 'accepted', 'reviewing', 'referred', 'completed'])
+      .maybeSingle()
 
-    if (!error) {
+    if (existingDbReq) {
+      if (existingDbReq.status === 'pending') {
+        toast.error(`A ${requestType} request has already been sent and is currently pending.`)
+      } else if (existingDbReq.status === 'accepted') {
+        toast.info(`${requestType === 'mentorship' ? 'Mentorship' : 'Referral'} has already been given/accepted with this alumni.`)
+      } else {
+        toast.info(`A ${requestType} request already exists (${existingDbReq.status}).`)
+      }
+
+      // Sync local requests
+      const { data: refreshed } = await supabase
+        .from('requests')
+        .select('*')
+        .eq('student_id', userId)
+      if (refreshed) setMyRequests(refreshed)
+
+      setIsSubmitting(false)
+      setDialogOpen(false)
+      return
+    }
+
+    const { data: inserted, error } = await supabase
+      .from('requests')
+      .insert({
+        student_id: userId,
+        alumni_id: selectedAlumniId,
+        type: requestType,
+        message: requestMessage.trim(),
+        status: 'pending'
+      })
+      .select()
+      .single()
+
+    if (!error && inserted) {
+      setMyRequests((prev) => [inserted, ...prev])
       setDialogOpen(false)
       setRequestMessage('')
       toast.success(`${requestType === 'mentorship' ? 'Mentorship' : 'Referral'} request sent successfully!`)
     } else {
-      toast.error('Failed to send request', { description: error.message })
+      toast.error('Failed to send request', { description: error?.message || 'Please try again.' })
     }
     setIsSubmitting(false)
   }
@@ -738,62 +835,270 @@ export default function DirectoryPage() {
                   </div>
                 </CardContent>
                 <CardFooter className="pt-3 border-t border-slate-100 dark:border-slate-800 flex gap-2">
-                  <Dialog open={dialogOpen && selectedAlumniId === person.user_id} onOpenChange={(open) => {
-                    setDialogOpen(open)
-                    if (open) {
-                      setSelectedAlumniId(person.user_id)
-                      setRequestType('mentorship')
-                    } else {
-                      setSelectedAlumniId(null)
+                  {/* Mentorship Status Action Button */}
+                  {(() => {
+                    const mentorshipReq = getRequestForAlumni(person.user_id, 'mentorship')
+                    if (mentorshipReq?.status === 'pending') {
+                      return (
+                        <Button
+                          variant="outline"
+                          className="flex-1 border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400 hover:bg-amber-100 hover:text-amber-800 text-xs sm:text-sm font-medium transition-all"
+                          onClick={() => {
+                            setSelectedAlumniId(person.user_id)
+                            setRequestType('mentorship')
+                            setDialogOpen(true)
+                          }}
+                        >
+                          <Clock className="w-3.5 h-3.5 mr-1.5 text-amber-600 dark:text-amber-400" />
+                          Pending
+                        </Button>
+                      )
                     }
-                  }}>
-                    <DialogTrigger render={<Button className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-xs sm:text-sm" />}>
-                      Mentorship
-                    </DialogTrigger>
-                    <DialogContent className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 sm:max-w-[425px]">
-                      <DialogHeader>
-                        <DialogTitle>Request {requestType === 'mentorship' ? 'Mentorship' : 'Referral'}</DialogTitle>
-                        <DialogDescription>
-                          Send a brief message to {person.full_name} for a {requestType}.
-                        </DialogDescription>
-                      </DialogHeader>
-                      <div className="grid gap-4 py-4">
-                        <Textarea
-                          placeholder="Hi! I'm interested in..."
-                          value={requestMessage}
-                          onChange={(e) => setRequestMessage(e.target.value)}
-                          className="bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700 h-32"
-                        />
-                      </div>
-                      <DialogFooter>
-                        <Button variant="outline" onClick={() => setDialogOpen(false)} className="border-slate-200 dark:border-slate-700">
-                          Cancel
+                    if (mentorshipReq?.status === 'accepted') {
+                      return (
+                        <Button
+                          variant="outline"
+                          className="flex-1 border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 hover:text-emerald-800 text-xs sm:text-sm font-medium transition-all"
+                          onClick={() => {
+                            setSelectedAlumniId(person.user_id)
+                            setRequestType('mentorship')
+                            setDialogOpen(true)
+                          }}
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5 mr-1.5 text-emerald-600 dark:text-emerald-400" />
+                          Mentorship Given
                         </Button>
-                        <Button onClick={handleRequestMentorship} disabled={isSubmitting || !requestMessage.trim()} className="bg-blue-600 hover:bg-blue-700 text-white">
-                          {isSubmitting && <Loader2 className="size-4 animate-spin" />}
-                          {isSubmitting ? 'Sending...' : 'Send Request'}
+                      )
+                    }
+                    if (mentorshipReq?.status === 'completed') {
+                      return (
+                        <Button
+                          variant="outline"
+                          className="flex-1 border-blue-300 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-400 text-xs sm:text-sm font-medium transition-all"
+                          onClick={() => {
+                            setSelectedAlumniId(person.user_id)
+                            setRequestType('mentorship')
+                            setDialogOpen(true)
+                          }}
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5 mr-1.5 text-blue-600 dark:text-blue-400" />
+                          Completed
                         </Button>
-                      </DialogFooter>
-                    </DialogContent>
-                  </Dialog>
+                      )
+                    }
+                    return (
+                      <Button
+                        className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-xs sm:text-sm font-medium transition-all"
+                        onClick={() => {
+                          setSelectedAlumniId(person.user_id)
+                          setRequestType('mentorship')
+                          setRequestMessage('')
+                          setDialogOpen(true)
+                        }}
+                      >
+                        <GraduationCap className="w-3.5 h-3.5 mr-1.5" />
+                        {mentorshipReq?.status === 'declined' || mentorshipReq?.status === 'rejected' ? 'Re-request' : 'Mentorship'}
+                      </Button>
+                    )
+                  })()}
 
-                  <Button
-                    variant="outline"
-                    className="flex-1 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:border-blue-300 hover:text-blue-600 text-xs sm:text-sm"
-                    onClick={() => {
-                      setRequestType('referral')
-                      setSelectedAlumniId(person.user_id)
-                      setDialogOpen(true)
-                    }}
-                  >
-                    Referral
-                  </Button>
+                  {/* Referral Status Action Button */}
+                  {(() => {
+                    const referralReq = getRequestForAlumni(person.user_id, 'referral')
+                    if (referralReq?.status === 'pending' || referralReq?.status === 'reviewing') {
+                      return (
+                        <Button
+                          variant="outline"
+                          className="flex-1 border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400 hover:bg-amber-100 text-xs sm:text-sm font-medium transition-all"
+                          onClick={() => {
+                            setSelectedAlumniId(person.user_id)
+                            setRequestType('referral')
+                            setDialogOpen(true)
+                          }}
+                        >
+                          <Clock className="w-3.5 h-3.5 mr-1.5 text-amber-600 dark:text-amber-400" />
+                          Referral Pending
+                        </Button>
+                      )
+                    }
+                    if (referralReq?.status === 'accepted' || referralReq?.status === 'referred') {
+                      return (
+                        <Button
+                          variant="outline"
+                          className="flex-1 border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 text-xs sm:text-sm font-medium transition-all"
+                          onClick={() => {
+                            setSelectedAlumniId(person.user_id)
+                            setRequestType('referral')
+                            setDialogOpen(true)
+                          }}
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5 mr-1.5 text-emerald-600 dark:text-emerald-400" />
+                          Referred
+                        </Button>
+                      )
+                    }
+                    return (
+                      <Button
+                        variant="outline"
+                        className="flex-1 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:border-blue-300 hover:text-blue-600 text-xs sm:text-sm font-medium transition-all"
+                        onClick={() => {
+                          setSelectedAlumniId(person.user_id)
+                          setRequestType('referral')
+                          setRequestMessage('')
+                          setDialogOpen(true)
+                        }}
+                      >
+                        <Briefcase className="w-3.5 h-3.5 mr-1.5" />
+                        Referral
+                      </Button>
+                    )
+                  })()}
                 </CardFooter>
               </Card>
             )
           })}
         </div>
       )}
+
+      {/* Student Request Mentorship/Referral Dialog */}
+      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <DialogContent className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 sm:max-w-[460px]">
+          {(() => {
+            const selectedAlumni = alumni.find((a) => a.user_id === selectedAlumniId)
+            const activeExistingReq = selectedAlumniId ? getRequestForAlumni(selectedAlumniId, requestType) : undefined
+
+            if (!selectedAlumni) return null
+
+            return (
+              <>
+                <DialogHeader>
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-full overflow-hidden bg-gradient-to-br from-blue-100 to-indigo-100 dark:from-blue-900/50 dark:to-indigo-900/50 flex items-center justify-center flex-shrink-0">
+                      {selectedAlumni.avatar_url ? (
+                        <img src={selectedAlumni.avatar_url} alt={selectedAlumni.full_name} className="w-full h-full object-cover" />
+                      ) : (
+                        <span className="text-blue-700 dark:text-blue-300 text-base font-bold">
+                          {selectedAlumni.full_name.slice(0, 2).toUpperCase()}
+                        </span>
+                      )}
+                    </div>
+                    <div>
+                      <DialogTitle className="text-lg">
+                        {requestType === 'mentorship' ? 'Mentorship' : 'Referral'} Request
+                      </DialogTitle>
+                      <DialogDescription className="text-xs">
+                        {selectedAlumni.full_name}
+                        {selectedAlumni.role && ` • ${selectedAlumni.role}`}
+                        {selectedAlumni.company && ` at ${selectedAlumni.company}`}
+                      </DialogDescription>
+                    </div>
+                  </div>
+                </DialogHeader>
+
+                {/* Status Notice: Request Pending */}
+                {activeExistingReq && activeExistingReq.status === 'pending' && (
+                  <div className="mt-2 p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300 text-sm flex items-start gap-2.5">
+                    <Clock className="w-4 h-4 mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                    <div className="space-y-1">
+                      <p className="font-semibold text-sm">
+                        {requestType === 'mentorship' ? 'Mentorship request is pending' : 'Referral request is pending'}
+                      </p>
+                      <p className="text-xs text-amber-700 dark:text-amber-400/90 leading-relaxed">
+                        You have already sent a {requestType} request to {selectedAlumni.full_name} on {formatDate(activeExistingReq.created_at)}. Please wait for their response.
+                      </p>
+                      {activeExistingReq.message && (
+                        <div className="mt-2 p-2.5 rounded-lg bg-amber-100/70 dark:bg-amber-900/40 text-xs italic text-amber-900 dark:text-amber-200 border border-amber-200/50 dark:border-amber-700/50 leading-relaxed">
+                          &ldquo;{activeExistingReq.message}&rdquo;
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Status Notice: Already Accepted / Given */}
+                {activeExistingReq && (activeExistingReq.status === 'accepted' || activeExistingReq.status === 'reviewing' || activeExistingReq.status === 'referred') && (
+                  <div className="mt-2 p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 text-sm flex items-start gap-2.5">
+                    <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                    <div className="space-y-1">
+                      <p className="font-semibold text-sm">
+                        {requestType === 'mentorship' ? 'Mentorship already given' : 'Referral already active'}
+                      </p>
+                      <p className="text-xs text-emerald-700 dark:text-emerald-400/90 leading-relaxed">
+                        {selectedAlumni.full_name} has already accepted your {requestType} request! You are connected and can reach out directly.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Status Notice: Completed */}
+                {activeExistingReq && activeExistingReq.status === 'completed' && (
+                  <div className="mt-2 p-3.5 rounded-xl bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 text-blue-800 dark:text-blue-300 text-sm flex items-start gap-2.5">
+                    <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0 text-blue-600 dark:text-blue-400" />
+                    <div className="space-y-1">
+                      <p className="font-semibold text-sm">Mentorship Completed</p>
+                      <p className="text-xs text-blue-700 dark:text-blue-400/90 leading-relaxed">
+                        Your previous mentorship session with {selectedAlumni.full_name} has been completed.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* New Request Input (only when no pending or active request) */}
+                {(!activeExistingReq || activeExistingReq.status === 'declined' || activeExistingReq.status === 'rejected') && (
+                  <div className="grid gap-3 py-2">
+                    <label className="text-xs font-medium text-slate-700 dark:text-slate-300">
+                      Message to {selectedAlumni.full_name}
+                    </label>
+                    <Textarea
+                      placeholder={
+                        requestType === 'mentorship'
+                          ? "Hi! I noticed your experience and would love your mentorship on..."
+                          : "Hi! I'm interested in roles at your company and would love to explore a referral..."
+                      }
+                      value={requestMessage}
+                      onChange={(e) => setRequestMessage(e.target.value)}
+                      className="bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700 h-28"
+                    />
+                    <p className="text-[11px] text-slate-400">
+                      Introduce yourself and briefly describe what advice or assistance you are seeking.
+                    </p>
+                  </div>
+                )}
+
+                <DialogFooter className="gap-2 mt-2">
+                  <Button variant="outline" onClick={() => setDialogOpen(false)} className="border-slate-200 dark:border-slate-700">
+                    Close
+                  </Button>
+
+                  {activeExistingReq?.status === 'accepted' || activeExistingReq?.status === 'reviewing' || activeExistingReq?.status === 'referred' ? (
+                    <Link href="/messages">
+                      <Button className="bg-emerald-600 hover:bg-emerald-700 text-white">
+                        <MessageSquare className="size-4 mr-2" />
+                        Open Messages
+                      </Button>
+                    </Link>
+                  ) : activeExistingReq?.status === 'pending' ? (
+                    <Link href="/requests">
+                      <Button variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-50">
+                        View in Requests
+                      </Button>
+                    </Link>
+                  ) : (
+                    <Button
+                      onClick={handleRequestMentorship}
+                      disabled={isSubmitting || !requestMessage.trim()}
+                      className="bg-blue-600 hover:bg-blue-700 text-white"
+                    >
+                      {isSubmitting && <Loader2 className="size-4 animate-spin mr-2" />}
+                      {isSubmitting ? 'Sending...' : 'Send Request'}
+                    </Button>
+                  )}
+                </DialogFooter>
+              </>
+            )
+          })()}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

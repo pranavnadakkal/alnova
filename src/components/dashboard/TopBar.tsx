@@ -1,8 +1,9 @@
 'use client'
 
 import Link from 'next/link'
-import { Search, Bell, ChevronDown, Menu, X } from 'lucide-react'
+import { Search, ChevronDown, Menu, X } from 'lucide-react'
 import { useState } from 'react'
+import NotificationBell from '@/components/dashboard/NotificationBell'
 
 interface TopBarProps {
   profile: {
@@ -34,7 +35,7 @@ export default function TopBar({ profile }: TopBarProps) {
         </button>
 
         {/* Mobile Logo */}
-        <Link href={profile.role === 'alumni' ? '/alumni-dashboard' : '/student-dashboard'} className="lg:hidden flex items-center gap-2">
+        <Link href={profile.role === 'alumni' ? '/alumni-dashboard' : profile.role === 'teacher' ? '/announcements' : '/student-dashboard'} className="lg:hidden flex items-center gap-2">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-600 to-blue-700 flex items-center justify-center shadow-md shadow-blue-600/20">
             <span className="text-white font-bold text-xs">A</span>
           </div>
@@ -58,10 +59,7 @@ export default function TopBar({ profile }: TopBarProps) {
         {/* Right Side */}
         <div className="flex items-center gap-3">
           {/* Notification Bell */}
-          <button className="relative p-2 rounded-xl text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
-            <Bell className="w-5 h-5" />
-            <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-blue-600 rounded-full ring-2 ring-white dark:ring-slate-900" />
-          </button>
+          <NotificationBell />
 
           {/* Profile */}
           <div className="flex items-center gap-2.5 pl-3 border-l border-slate-200 dark:border-slate-700">
@@ -92,16 +90,24 @@ export default function TopBar({ profile }: TopBarProps) {
                 <span className="text-lg font-bold text-slate-900 dark:text-white">ALNOVA</span>
               </div>
             </div>
-            {(profile.role === 'alumni' ? [
+            {(profile.role === 'admin' ? [
+              { label: 'Admin Portal', href: '/dashboard/admin' },
+              { label: 'Profile', href: '/profile' },
+            ] : profile.role === 'teacher' ? [
+              { label: 'Dashboard', href: '/teacher-dashboard' },
+              { label: 'Announcements', href: '/announcements' },
+              { label: 'Profile', href: '/profile' },
+            ] : profile.role === 'alumni' ? [
               { label: 'Dashboard', href: '/alumni-dashboard' },
               { label: 'Directory', href: '/directory' },
-              { label: 'Requests', href: '/requests' },
+              { label: 'Announcements', href: '/announcements' },
               { label: 'Messages', href: '/messages' },
               { label: 'Profile', href: '/profile' },
             ] : [
               { label: 'Dashboard', href: '/student-dashboard' },
               { label: 'Directory', href: '/directory' },
               { label: 'Requests', href: '/requests' },
+              { label: 'Announcements', href: '/announcements' },
               { label: 'Messages', href: '/messages' },
               { label: 'Profile', href: '/profile' },
             ]).map((item) => (

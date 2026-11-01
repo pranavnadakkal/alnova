@@ -6,16 +6,24 @@ import { createClient } from '@/lib/supabase/client'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import * as z from 'zod'
-import { Loader2, Eye, EyeOff } from 'lucide-react'
+import { Loader2, Eye, EyeOff, AlertCircle } from 'lucide-react'
 import { toast } from 'sonner'
+import { cn } from '@/lib/utils'
 
 const resetPasswordSchema = z.object({
-  password: z.string().min(6, { message: 'Password must be at least 6 characters' }),
-  confirmPassword: z.string()
+  password: z
+    .string()
+    .min(1, { message: 'Password is required' })
+    .min(6, { message: 'Password must be at least 6 characters' }),
+  confirmPassword: z
+    .string()
+    .min(1, { message: 'Please confirm your password' }),
 }).refine((data) => data.password === data.confirmPassword, {
   message: "Passwords don't match",
   path: ["confirmPassword"],
 })
+
+type ResetPasswordFormData = z.infer<typeof resetPasswordSchema>
 
 export default function ResetPasswordPage() {
   const router = useRouter()
@@ -23,19 +31,27 @@ export default function ResetPasswordPage() {
   const [isLoading, setIsLoading] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const [showConfirm, setShowConfirm] = useState(false)
+  const [serverError, setServerError] = useState<string | null>(null)
 
-  const { register, handleSubmit, formState: { errors } } = useForm<z.infer<typeof resetPasswordSchema>>({
+  const {
+    register,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<ResetPasswordFormData>({
     resolver: zodResolver(resetPasswordSchema),
+    mode: 'onTouched',
   })
 
-  const onSubmit = async (data: z.infer<typeof resetPasswordSchema>) => {
+  const onSubmit = async (data: ResetPasswordFormData) => {
     setIsLoading(true)
+    setServerError(null)
     
     const { error } = await supabase.auth.updateUser({
       password: data.password
     })
 
     if (error) {
+      setServerError(error.message)
       toast.error(error.message)
       setIsLoading(false)
       return
@@ -62,8 +78,16 @@ export default function ResetPasswordPage() {
         Please enter your new password below.
       </p>
 
+      {/* Server error alert */}
+      {serverError && (
+        <div className="mb-5 p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2.5 animate-in fade-in">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 text-red-500" />
+          <span className="leading-snug">{serverError}</span>
+        </div>
+      )}
+
       {/* Form */}
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
+      <form onSubmit={handleSubmit(onSubmit)} noValidate className="space-y-5">
         {/* Password */}
         <div>
           <div className="relative">
@@ -72,7 +96,12 @@ export default function ResetPasswordPage() {
               type={showPassword ? 'text' : 'password'}
               placeholder="New password"
               autoComplete="new-password"
-              className="w-full h-[52px] px-4 pr-12 rounded-xl border border-[#d1d5db] bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee] transition-all"
+              className={cn(
+                "w-full h-[52px] px-4 pr-12 rounded-xl border bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none transition-all",
+                errors.password
+                  ? "border-red-500 focus:ring-2 focus:ring-red-500/20 focus:border-red-500"
+                  : "border-[#d1d5db] focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee]"
+              )}
               {...register('password')}
             />
             <button
@@ -84,7 +113,11 @@ export default function ResetPasswordPage() {
               {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
             </button>
           </div>
-          {errors.password && <p className="text-xs text-red-500 mt-1.5 ml-1">{errors.password.message}</p>}
+          {errors.password && (
+            <p className="text-xs text-red-500 mt-1.5 ml-1 flex items-center gap-1">
+              {errors.password.message}
+            </p>
+          )}
         </div>
 
         {/* Confirm Password */}
@@ -95,19 +128,28 @@ export default function ResetPasswordPage() {
               type={showConfirm ? 'text' : 'password'}
               placeholder="Confirm new password"
               autoComplete="new-password"
-              className="w-full h-[52px] px-4 pr-12 rounded-xl border border-[#d1d5db] bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee] transition-all"
+              className={cn(
+                "w-full h-[52px] px-4 pr-12 rounded-xl border bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none transition-all",
+                errors.confirmPassword
+                  ? "border-red-500 focus:ring-2 focus:ring-red-500/20 focus:border-red-500"
+                  : "border-[#d1d5db] focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee]"
+              )}
               {...register('confirmPassword')}
             />
             <button
               type="button"
-              onClick={() => setShowConfirm(!showConfirm)}
+              onClick={() => setShowPassword(!showPassword)}
               className="absolute right-4 top-1/2 -translate-y-1/2 text-[#9ca3af] hover:text-[#6b7280] transition-colors"
-              aria-label={showConfirm ? 'Hide password' : 'Show password'}
+              aria-label={showPassword ? 'Hide password' : 'Show password'}
             >
-              {showConfirm ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+              {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
             </button>
           </div>
-          {errors.confirmPassword && <p className="text-xs text-red-500 mt-1.5 ml-1">{errors.confirmPassword.message}</p>}
+          {errors.confirmPassword && (
+            <p className="text-xs text-red-500 mt-1.5 ml-1 flex items-center gap-1">
+              {errors.confirmPassword.message}
+            </p>
+          )}
         </div>
 
         {/* Submit button */}

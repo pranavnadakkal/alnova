@@ -1,139 +1,269 @@
 'use client'
 
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
+import { useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { Profile } from '@/types'
-import { Search, Send, Loader2, MessageSquare } from 'lucide-react'
-import { Card } from '@/components/ui/card'
+import {
+  Search,
+  Send,
+  Loader2,
+  MessageSquare,
+  CheckCheck,
+  Sparkles,
+  Circle,
+  Clock,
+  RotateCcw,
+  X
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import { toast } from 'sonner'
 
 interface ChatInterfaceProps {
   userId: string
-  userRole: 'student' | 'alumni'
+  userRole: 'student' | 'alumni' | 'teacher'
 }
 
 interface ConnectedUser {
   profile: Profile
   conversationId?: string
+  lastMessage?: string
+  lastMessageTime?: string
+  unreadCount?: number
 }
 
-interface Message {
+interface ChatMessage {
   id: string
   conversation_id: string
   sender_id: string
   content: string
   created_at: string
+  isOptimistic?: boolean
+  error?: boolean
 }
 
 export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) {
+  const searchParams = useSearchParams()
+  const targetAlumniId = searchParams.get('alumniId')
+  const targetConvId = searchParams.get('conversationId')
+
   const supabase = useMemo(() => createClient(), [])
   const [connections, setConnections] = useState<ConnectedUser[]>([])
+  const [searchQuery, setSearchQuery] = useState('')
   const [activeConnection, setActiveConnection] = useState<ConnectedUser | null>(null)
-  const [messages, setMessages] = useState<Message[]>([])
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [newMessage, setNewMessage] = useState('')
   const [isLoading, setIsLoading] = useState(true)
   const [isSending, setIsSending] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  // 1. Fetch connected users (accepted requests)
+  const scrollToBottom = useCallback((smooth = true) => {
+    setTimeout(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto' })
+    }, 50)
+  }, [])
+
+  // 1. Fetch conversations and connected users
   useEffect(() => {
     const fetchConnections = async () => {
       setIsLoading(true)
       try {
-        const idField = userRole === 'student' ? 'student_id' : 'alumni_id'
-        const otherIdField = userRole === 'student' ? 'alumni_id' : 'student_id'
+        const idField = userRole === 'alumni' ? 'alumni_id' : 'student_id'
+        const otherIdField = userRole === 'alumni' ? 'student_id' : 'alumni_id'
 
-        // Fetch requests that indicate a connection
-        const { data: requests, error } = await supabase
-          .from('requests')
-          .select('*')
-          .eq(idField, userId)
-          .in('status', ['accepted', 'completed', 'reviewing'])
+        let connectedIds: string[]
+        if (userRole === 'teacher') {
+          const { data: alumniUsers, error: alumniUsersError } = await supabase
+            .from('users')
+            .select('id')
+            .eq('role', 'alumni')
 
-        if (error) throw error
+          const { data: alumniProfiles, error: alumniProfilesError } = await supabase
+            .from('profiles')
+            .select('id, role')
+            .eq('role', 'alumni')
 
-        if (requests && requests.length > 0) {
-          // Extract unique connected user IDs
-          const connectedIds = Array.from(new Set(requests.map(r => r[otherIdField])))
+          if (alumniUsersError && alumniProfilesError) {
+            throw alumniUsersError
+          }
 
-          // Fetch their profiles
-          const { data: profiles, error: profilesError } = await supabase
+          connectedIds = [
+            ...(alumniUsers || []).map((user) => user.id),
+            ...(alumniProfiles || []).map((profile) => profile.id),
+          ]
+            .filter((id): id is string => Boolean(id))
+          connectedIds = Array.from(new Set(connectedIds))
+        } else {
+          const { data: requests } = await supabase
+            .from('requests')
+            .select('*')
+            .eq(idField, userId)
+
+          const { data: sessions } = await supabase
+            .from('mentorship_sessions')
+            .select('*')
+            .eq(idField, userId)
+
+          connectedIds = Array.from(
+            new Set([
+              ...(requests || []).map((r: any) => r[otherIdField]),
+              ...(sessions || []).map((s: any) => s[otherIdField]),
+              ...(targetAlumniId ? [targetAlumniId] : []),
+            ])
+          ).filter(Boolean)
+        }
+
+        // If targetAlumniId is present but not in connectedIds, include it
+        if (userRole !== 'teacher' && targetAlumniId && !connectedIds.includes(targetAlumniId)) {
+          connectedIds.push(targetAlumniId)
+        }
+
+        // Fetch profiles
+        let profiles: any[] = []
+        if (connectedIds.length > 0) {
+          const { data: userIdProfiles } = await supabase
             .from('profiles')
             .select('*')
-            .in('user_id', connectedIds)
+            .in('id', connectedIds)
+          profiles = userIdProfiles || []
 
-          if (profilesError) throw profilesError
+        }
 
-          // Fetch existing conversations
-          const { data: conversations, error: convError } = await supabase
+        // Fetch existing conversations
+        const { data: conversations } = targetAlumniId || targetConvId
+          ? await supabase
             .from('conversations')
             .select('*')
             .or(`${idField}.eq.${userId}`)
+          : { data: [] }
 
-          if (convError) throw convError
+        // Fetch last message preview for each conversation
+        const convIds = (conversations || []).map((c) => c.id)
+        const lastMessagesMap = new Map<string, { content: string; time: string }>()
 
-          const connectionsList = (profiles || []).map(p => {
-            const conv = conversations?.find(c => c[otherIdField] === p.user_id)
-            return {
-              profile: p,
-              conversationId: conv?.id
-            }
-          })
+        if (convIds.length > 0) {
+          const { data: recentMsgs } = await supabase
+            .from('messages')
+            .select('conversation_id, content, created_at')
+            .in('conversation_id', convIds)
+            .order('created_at', { ascending: false })
 
-          setConnections(connectionsList)
+          if (recentMsgs) {
+            recentMsgs.forEach((m) => {
+              if (!lastMessagesMap.has(m.conversation_id)) {
+                lastMessagesMap.set(m.conversation_id, {
+                  content: m.content,
+                  time: m.created_at,
+                })
+              }
+            })
+          }
         }
-      } catch (error) {
-        console.error('Failed to load connections:', error)
-        toast.error('Failed to load connections.')
+
+        const uniqueProfiles = Array.from(
+          new Map(profiles.map((p) => [p.user_id || p.id, p])).values(),
+        )
+        const list: ConnectedUser[] = uniqueProfiles.map((p) => {
+          const profile = { ...p, user_id: p.user_id || p.id }
+          const conv = conversations?.find((c) => c[otherIdField] === profile.user_id)
+          const lastMsg = conv?.id ? lastMessagesMap.get(conv.id) : undefined
+          return {
+            profile,
+            conversationId: conv?.id,
+            lastMessage: lastMsg?.content,
+            lastMessageTime: lastMsg?.time,
+          }
+        })
+
+        // Sort by most recent message
+        list.sort((a, b) => {
+          const tA = a.lastMessageTime ? new Date(a.lastMessageTime).getTime() : 0
+          const tB = b.lastMessageTime ? new Date(b.lastMessageTime).getTime() : 0
+          return tB - tA
+        })
+
+        setConnections(list)
+
+        // Auto-select if URL params specify
+        if (targetAlumniId) {
+          const found = list.find((c) => c.profile.user_id === targetAlumniId)
+          if (found) {
+            handleSelectConnection(found)
+          }
+        } else if (targetConvId) {
+          const found = list.find((c) => c.conversationId === targetConvId)
+          if (found) {
+            handleSelectConnection(found)
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load chat connections:', err)
+        toast.error('Failed to load conversations.')
       } finally {
         setIsLoading(false)
       }
     }
 
     fetchConnections()
-  }, [supabase, userId, userRole])
+  }, [supabase, userId, userRole, targetAlumniId, targetConvId])
 
-  // 2. Fetch messages for active connection & subscribe to updates
+  // 2. Fetch messages & subscribe to Realtime channel
   useEffect(() => {
-    if (!activeConnection || !activeConnection.conversationId) {
+    if (!activeConnection?.conversationId) {
       setMessages([])
       return
     }
+
+    const conversationId = activeConnection.conversationId
 
     const fetchMessages = async () => {
       const { data, error } = await supabase
         .from('messages')
         .select('*')
-        .eq('conversation_id', activeConnection.conversationId!)
+        .eq('conversation_id', conversationId)
         .order('created_at', { ascending: true })
 
       if (error) {
-        toast.error('Failed to load messages')
+        toast.error('Failed to load message history.')
       } else {
         setMessages(data || [])
-        scrollToBottom()
+        scrollToBottom(false)
       }
     }
 
     fetchMessages()
 
-    // Subscribe to new messages
+    // Realtime channel subscription
+    const channelName = `realtime:messages:${conversationId}`
     const channel = supabase
-      .channel(`chat_${activeConnection.conversationId}`)
+      .channel(channelName)
       .on(
         'postgres_changes',
         {
           event: 'INSERT',
           schema: 'public',
           table: 'messages',
-          filter: `conversation_id=eq.${activeConnection.conversationId}`,
+          filter: `conversation_id=eq.${conversationId}`,
         },
         (payload) => {
-          const newMsg = payload.new as Message
-          setMessages((prev) => [...prev, newMsg])
-          scrollToBottom()
+          const newMsg = payload.new as ChatMessage
+          setMessages((prev) => {
+            // Replace optimistic message if match found
+            const hasOptimistic = prev.some(
+              (m) => m.isOptimistic && m.content === newMsg.content && m.sender_id === newMsg.sender_id
+            )
+            if (hasOptimistic) {
+              return prev.map((m) =>
+                m.isOptimistic && m.content === newMsg.content ? newMsg : m
+              )
+            }
+            if (prev.some((m) => m.id === newMsg.id)) return prev
+            return [...prev, newMsg]
+          })
+          scrollToBottom(true)
         }
       )
       .subscribe()
@@ -141,21 +271,15 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [activeConnection, supabase])
+  }, [activeConnection?.conversationId, supabase, scrollToBottom])
 
-  const scrollToBottom = () => {
-    setTimeout(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }, 100)
-  }
-
+  // Select connection and ensure conversation exists in DB
   const handleSelectConnection = async (conn: ConnectedUser) => {
-    let currentConn = { ...conn }
+    const currentConn = { ...conn }
 
-    // If no conversation exists, create it
     if (!currentConn.conversationId) {
       try {
-        const student_id = userRole === 'student' ? userId : currentConn.profile.user_id
+        const student_id = userRole === 'alumni' ? currentConn.profile.user_id : userId
         const alumni_id = userRole === 'alumni' ? userId : currentConn.profile.user_id
 
         const { data: newConv, error } = await supabase
@@ -165,18 +289,15 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
           .single()
 
         if (error) {
-          // Maybe it was created concurrently
-          if (error.code === '23505') { // Unique violation
-            const { data: existingConv } = await supabase
+          if (error.code === '23505') {
+            const { data: existing } = await supabase
               .from('conversations')
               .select('*')
               .eq('student_id', student_id)
               .eq('alumni_id', alumni_id)
               .single()
-            
-            if (existingConv) {
-              currentConn.conversationId = existingConv.id
-            }
+
+            if (existing) currentConn.conversationId = existing.id
           } else {
             throw error
           }
@@ -184,10 +305,27 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
           currentConn.conversationId = newConv.id
         }
 
-        // Update in connections list
-        setConnections(prev => prev.map(c => c.profile.user_id === currentConn.profile.user_id ? currentConn : c))
-      } catch (error) {
-        toast.error('Failed to start conversation')
+        setConnections((prev) =>
+          prev.map((c) => (c.profile.user_id === currentConn.profile.user_id ? currentConn : c))
+        )
+      } catch (err) {
+        const message = err instanceof Error
+          ? err.message
+          : err && typeof err === 'object' && 'message' in err && typeof err.message === 'string'
+            ? err.message
+            : 'Unable to start this conversation.'
+        console.error('Failed to initialize conversation:', {
+          code: err && typeof err === 'object' && 'code' in err ? err.code : undefined,
+          message,
+          details: err && typeof err === 'object' && 'details' in err ? err.details : undefined,
+        })
+        toast.error('Could not start conversation.', {
+          description: message.includes('conversation_participants')
+            ? 'Run migration 09_remove_unused_participant_rls.sql in Supabase SQL Editor.'
+            : message.includes("alumni_id")
+              ? 'Run migration 07_repair_conversations_for_teacher_messaging.sql in Supabase SQL Editor.'
+            : message,
+        })
         return
       }
     }
@@ -195,120 +333,388 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
     setActiveConnection(currentConn)
   }
 
-  const handleSendMessage = async (e: React.FormEvent) => {
-    e.preventDefault()
+  // 3. Send message with Optimistic UI updates
+  const handleSendMessage = async (e?: React.FormEvent) => {
+    e?.preventDefault()
     if (!newMessage.trim() || !activeConnection?.conversationId) return
 
     const content = newMessage.trim()
-    setNewMessage('')
-    setIsSending(true)
+    const tempId = `optimistic-${Date.now()}`
+    const conversationId = activeConnection.conversationId
 
-    const { error } = await supabase.from('messages').insert({
-      conversation_id: activeConnection.conversationId,
+    // Optimistic message object
+    const optimisticMsg: ChatMessage = {
+      id: tempId,
+      conversation_id: conversationId,
       sender_id: userId,
       content,
-    })
-
-    if (error) {
-      toast.error('Failed to send message')
-      setNewMessage(content) // restore
+      created_at: new Date().toISOString(),
+      isOptimistic: true,
     }
-    setIsSending(false)
+
+    // Update UI immediately
+    setMessages((prev) => [...prev, optimisticMsg])
+    setNewMessage('')
+    setIsSending(true)
+    scrollToBottom(true)
+
+    // Update last message preview in left pane
+    setConnections((prev) =>
+      prev.map((c) =>
+        c.conversationId === conversationId
+          ? { ...c, lastMessage: content, lastMessageTime: optimisticMsg.created_at }
+          : c
+      )
+    )
+
+    try {
+      const { data, error } = await supabase
+        .from('messages')
+        .insert({
+          conversation_id: conversationId,
+          sender_id: userId,
+          content,
+        })
+        .select()
+        .single()
+
+      if (error) {
+        throw error
+      }
+
+      // Replace optimistic message with confirmed row
+      if (data) {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === tempId ? { ...data, isOptimistic: false } : m))
+        )
+      }
+    } catch (err) {
+      console.error('Failed to send message:', err)
+      toast.error('Failed to send message.')
+      // Mark optimistic message with error
+      setMessages((prev) =>
+        prev.map((m) => (m.id === tempId ? { ...m, error: true } : m))
+      )
+    } finally {
+      setIsSending(false)
+      textareaRef.current?.focus()
+    }
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleSendMessage()
+    }
+    }
+
+    const handleRetryMessage = (message: ChatMessage) => {
+      setMessages((prev) => prev.filter((item) => item.id !== message.id))
+      setNewMessage(message.content)
+      requestAnimationFrame(() => textareaRef.current?.focus())
+    }
+
+    const handleDismissMessage = (messageId: string) => {
+      setMessages((prev) => prev.filter((message) => message.id !== messageId))
+  }
+
+  const filteredConnections = connections.filter((c) => {
+    const term = searchQuery.toLowerCase()
+    return (
+      !term ||
+      c.profile.full_name.toLowerCase().includes(term) ||
+      c.profile.company?.toLowerCase().includes(term) ||
+      c.profile.role?.toLowerCase().includes(term)
+    )
+  })
+
+  const formatMessageTime = (dateStr: string) => {
+    const d = new Date(dateStr)
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+
+  const formatConversationDate = (dateStr?: string) => {
+    if (!dateStr) return ''
+    const d = new Date(dateStr)
+    const now = new Date()
+    const diffDays = Math.floor((now.getTime() - d.getTime()) / (1000 * 3600 * 24))
+
+    if (diffDays === 0) {
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    }
+    if (diffDays === 1) return 'Yesterday'
+    if (diffDays < 7) return d.toLocaleDateString([], { weekday: 'short' })
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
   }
 
   if (isLoading) {
     return (
-      <div className="flex h-[calc(100vh-120px)] items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
+      <div className="flex h-[calc(100vh-140px)] items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+          <span className="text-xs text-slate-400">Loading your conversations...</span>
+        </div>
       </div>
     )
   }
 
   return (
-    <div className="flex h-[calc(100vh-120px)] gap-6">
-      {/* Sidebar - Connections List */}
-      <Card className="w-80 flex-shrink-0 flex flex-col overflow-hidden bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800">
-        <div className="p-4 border-b border-slate-200 dark:border-slate-800">
-          <h2 className="font-semibold text-lg">Messages</h2>
-          <div className="mt-4 relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input
+    <div className="flex flex-col md:flex-row h-[calc(100vh-140px)] rounded-3xl overflow-hidden border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm">
+      {/* =========================================
+          LEFT PANE: Conversations List
+         ========================================= */}
+      <aside className="w-full md:w-80 lg:w-96 flex flex-col border-r border-slate-200/80 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900 shrink-0">
+        {/* Header & Search */}
+        <div className="p-4 border-b border-slate-200/80 dark:border-slate-800 space-y-3">
+          <div className="flex items-center justify-between">
+            <h2 className="font-extrabold text-base text-slate-900 dark:text-white tracking-tight flex items-center gap-2">
+              <MessageSquare className="w-4 h-4 text-blue-600" />
+              Messages
+            </h2>
+            <span className="text-xs text-slate-400 font-medium">
+              {connections.length} {connections.length === 1 ? 'chat' : 'chats'}
+            </span>
+          </div>
+
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+            <Input
               type="text"
-              placeholder="Search connections..."
-              className="w-full h-9 pl-9 pr-4 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+              placeholder="Search conversations..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full h-9 pl-9 pr-3 rounded-xl bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-xs focus-visible:ring-blue-500"
             />
           </div>
         </div>
-        <div className="flex-1 overflow-y-auto p-2">
-          {connections.length === 0 ? (
-            <div className="text-center p-4 text-slate-500 text-sm">
-              No active connections yet. Connect with others first!
+
+        {/* Conversation List */}
+        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+          {filteredConnections.length === 0 ? (
+            <div className="text-center py-12 px-4 space-y-2">
+              <div className="w-10 h-10 rounded-full bg-slate-200/60 dark:bg-slate-800 flex items-center justify-center mx-auto text-slate-400">
+                <MessageSquare className="w-5 h-5" />
+              </div>
+              <p className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                {connections.length === 0 ? 'No connections yet' : 'No matching chats'}
+              </p>
+              <p className="text-[11px] text-slate-400 max-w-[200px] mx-auto">
+                {connections.length === 0
+                  ? userRole === 'teacher'
+                    ? 'No alumni have registered yet.'
+                    : 'Connect with alumni mentors in the directory to begin chatting.'
+                  : 'Try a different search term.'}
+              </p>
             </div>
           ) : (
-            connections.map(conn => {
+            filteredConnections.map((conn) => {
               const isActive = activeConnection?.profile.user_id === conn.profile.user_id
-              const initials = conn.profile.full_name?.split(' ').map(n => n[0]).join('').slice(0, 2) || 'U'
-              
+              const initials = conn.profile.full_name
+                ?.split(' ')
+                .map((n) => n[0])
+                .join('')
+                .slice(0, 2)
+                .toUpperCase() || 'AL'
+
               return (
                 <button
                   key={conn.profile.user_id}
                   onClick={() => handleSelectConnection(conn)}
-                  className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all ${
-                    isActive ? 'bg-blue-50 dark:bg-blue-500/10 text-blue-700 dark:text-blue-400' : 'hover:bg-slate-50 dark:hover:bg-slate-800'
+                  className={`w-full flex items-start gap-3 p-3 rounded-2xl transition-all text-left group ${
+                    isActive
+                      ? 'bg-blue-600 text-white shadow-md shadow-blue-600/20'
+                      : 'hover:bg-white dark:hover:bg-slate-800/60 text-slate-700 dark:text-slate-300'
                   }`}
                 >
-                  <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white text-sm font-semibold shadow-sm flex-shrink-0 ${
-                    isActive ? 'bg-blue-600' : 'bg-slate-400 dark:bg-slate-700'
-                  }`}>
-                    {initials}
+                  {/* Avatar */}
+                  <div className="relative shrink-0">
+                    <div
+                      className={`w-11 h-11 rounded-xl overflow-hidden flex items-center justify-center font-bold text-xs shadow-sm transition-colors ${
+                        isActive
+                          ? 'bg-white/20 text-white'
+                          : 'bg-gradient-to-br from-blue-100 to-indigo-100 dark:from-blue-900/50 dark:to-indigo-900/50 text-blue-700 dark:text-blue-300'
+                      }`}
+                    >
+                      {conn.profile.avatar_url ? (
+                        <img
+                          src={conn.profile.avatar_url}
+                          alt={conn.profile.full_name}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <span>{initials}</span>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex-1 text-left truncate">
-                    <p className="font-medium text-sm text-slate-900 dark:text-white truncate">{conn.profile.full_name}</p>
-                    <p className="text-xs text-slate-500 truncate">{conn.profile.company || conn.profile.role}</p>
+
+                  {/* Info & Last message */}
+                  <div className="flex-1 min-w-0 space-y-0.5">
+                    <div className="flex items-center justify-between gap-1">
+                      <span
+                        className={`text-xs font-bold truncate ${
+                          isActive ? 'text-white' : 'text-slate-900 dark:text-white'
+                        }`}
+                      >
+                        {conn.profile.full_name}
+                      </span>
+                      {conn.lastMessageTime && (
+                        <span
+                          className={`text-[10px] shrink-0 font-medium ${
+                            isActive ? 'text-blue-100' : 'text-slate-400'
+                          }`}
+                        >
+                          {formatConversationDate(conn.lastMessageTime)}
+                        </span>
+                      )}
+                    </div>
+
+                    <div
+                      className={`text-[11px] truncate font-medium ${
+                        isActive ? 'text-blue-100' : 'text-slate-500 dark:text-slate-400'
+                      }`}
+                    >
+                      {conn.profile.role}
+                      {conn.profile.company && ` • ${conn.profile.company}`}
+                    </div>
+
+                    <div
+                      className={`text-[11px] truncate leading-tight pt-0.5 ${
+                        isActive ? 'text-blue-100/90' : 'text-slate-400 dark:text-slate-500'
+                      }`}
+                    >
+                      {conn.lastMessage ? conn.lastMessage : 'Start conversation...'}
+                    </div>
                   </div>
                 </button>
               )
             })
           )}
         </div>
-      </Card>
+      </aside>
 
-      {/* Main Chat Area */}
-      <Card className="flex-1 flex flex-col overflow-hidden bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 relative">
+      {/* =========================================
+          RIGHT PANE: Active Chat Stream
+         ========================================= */}
+      <main className="flex-1 flex flex-col bg-white dark:bg-slate-950 min-w-0">
         {activeConnection ? (
           <>
-            {/* Chat Header */}
-            <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex items-center gap-3 bg-white/50 dark:bg-slate-900/50 backdrop-blur-sm z-10">
-              <div className="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center text-white text-sm font-semibold shadow-sm">
-                {activeConnection.profile.full_name?.split(' ').map(n => n[0]).join('').slice(0, 2) || 'U'}
-              </div>
-              <div>
-                <h3 className="font-semibold text-slate-900 dark:text-white">{activeConnection.profile.full_name}</h3>
-                <p className="text-xs text-slate-500">{activeConnection.profile.company || activeConnection.profile.role}</p>
-              </div>
-            </div>
+            {/* Top Chat Header */}
+            <header className="p-4 border-b border-slate-200/80 dark:border-slate-800 flex items-center justify-between gap-3 bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm z-10">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-xl overflow-hidden bg-gradient-to-br from-blue-100 to-indigo-100 dark:from-blue-900/50 dark:to-indigo-900/50 flex items-center justify-center font-bold text-xs text-blue-700 dark:text-blue-300 shrink-0">
+                  {activeConnection.profile.avatar_url ? (
+                    <img
+                      src={activeConnection.profile.avatar_url}
+                      alt={activeConnection.profile.full_name}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <span>
+                      {activeConnection.profile.full_name
+                        ?.split(' ')
+                        .map((n) => n[0])
+                        .join('')
+                        .slice(0, 2)
+                        .toUpperCase() || 'AL'}
+                    </span>
+                  )}
+                </div>
 
-            {/* Chat Messages */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50/50 dark:bg-slate-900/50">
+                <div className="min-w-0">
+                  <h3 className="font-bold text-sm text-slate-900 dark:text-white truncate">
+                    {activeConnection.profile.full_name}
+                  </h3>
+                  <p className="text-xs text-slate-500 truncate flex items-center gap-1.5">
+                    <span>{activeConnection.profile.role || 'Alumni Mentor'}</span>
+                    {activeConnection.profile.company && (
+                      <span>• {activeConnection.profile.company}</span>
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              {/* Status Indicator */}
+              <div className="flex items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800">
+                  <Circle className="w-2 h-2 fill-emerald-500 text-emerald-500" />
+                  Realtime Active
+                </span>
+              </div>
+            </header>
+
+            {/* Messages Scroll Area */}
+            <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3.5 bg-slate-50/30 dark:bg-slate-950">
               {messages.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-slate-400 space-y-3">
-                  <MessageSquare className="w-12 h-12 opacity-20" />
-                  <p>Send a message to start the conversation!</p>
+                <div className="flex flex-col items-center justify-center h-full text-slate-400 space-y-3 py-16">
+                  <div className="w-14 h-14 rounded-full bg-blue-50 dark:bg-blue-950/40 flex items-center justify-center text-blue-600">
+                    <Sparkles className="w-6 h-6" />
+                  </div>
+                  <div className="text-center max-w-sm">
+                    <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200">
+                      Start your conversation with {activeConnection.profile.full_name}
+                    </h4>
+                    <p className="text-xs text-slate-400 mt-1">
+                      Ask about their experience, request mentorship feedback, or follow up on scheduling.
+                    </p>
+                  </div>
                 </div>
               ) : (
-                messages.map(msg => {
+                messages.map((msg) => {
                   const isMine = msg.sender_id === userId
+
                   return (
-                    <div key={msg.id} className={`flex ${isMine ? 'justify-end' : 'justify-start'}`}>
-                      <div className={`max-w-[70%] rounded-2xl px-4 py-2.5 ${
-                        isMine 
-                          ? 'bg-blue-600 text-white rounded-br-sm' 
-                          : 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white border border-slate-100 dark:border-slate-700 rounded-bl-sm'
-                      }`}>
-                        <p className="text-[15px] leading-relaxed">{msg.content}</p>
-                        <p className={`text-[10px] mt-1 ${isMine ? 'text-blue-100' : 'text-slate-400'}`}>
-                          {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    <div
+                      key={msg.id}
+                      className={`flex ${isMine ? 'justify-end' : 'justify-start'} animate-in fade-in duration-200`}
+                    >
+                      <div
+                        className={`max-w-[78%] sm:max-w-[65%] rounded-2xl px-4 py-2.5 shadow-sm space-y-1 ${
+                          isMine
+                            ? 'bg-blue-600 text-white rounded-br-xs'
+                            : 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white border border-slate-200/80 dark:border-slate-800 rounded-bl-xs'
+                        } ${msg.error ? 'border-red-400 bg-red-500 text-white' : ''}`}
+                      >
+                        <p className="text-xs sm:text-sm leading-relaxed whitespace-pre-wrap break-words">
+                          {msg.content}
                         </p>
+
+                        <div
+                          className={`flex items-center justify-end gap-1 text-[10px] ${
+                            isMine ? 'text-blue-100' : 'text-slate-400'
+                          }`}
+                        >
+                          <span>{formatMessageTime(msg.created_at)}</span>
+                          {isMine && (
+                            <span>
+                              {msg.isOptimistic ? (
+                                  <Clock className="w-3 h-3 text-blue-200 animate-pulse" />
+                              ) : (
+                                  <CheckCheck className="w-3 h-3 text-blue-200" />
+                              )}
+                            </span>
+                          )}
+                        </div>
+                        {msg.error && (
+                          <div className="flex items-center justify-end gap-2 text-[10px] text-red-600 dark:text-red-400">
+                            <span>Not sent</span>
+                            <button
+                              type="button"
+                              onClick={() => handleRetryMessage(msg)}
+                              className="inline-flex items-center gap-1 font-semibold hover:text-red-700 dark:hover:text-red-300"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              Retry
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDismissMessage(msg.id)}
+                              className="rounded-full p-0.5 hover:bg-red-100 dark:hover:bg-red-900/30"
+                              aria-label="Dismiss failed message"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        )}
                       </div>
                     </div>
                   )
@@ -317,38 +723,54 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Chat Input */}
-            <div className="p-4 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
-              <form onSubmit={handleSendMessage} className="flex items-center gap-2">
-                <Input
-                  value={newMessage}
-                  onChange={e => setNewMessage(e.target.value)}
-                  placeholder="Type your message..."
-                  className="flex-1 rounded-full h-11 bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700 focus-visible:ring-blue-500"
-                />
-                <Button 
-                  type="submit" 
-                  size="icon" 
+            {/* Chat Input Bar */}
+            <footer className="p-3 sm:p-4 border-t border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900">
+              <form onSubmit={handleSendMessage} className="flex items-end gap-2">
+                <div className="flex-1 relative">
+                  <Textarea
+                    ref={textareaRef}
+                    value={newMessage}
+                    onChange={(e) => setNewMessage(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    rows={1}
+                    placeholder="Type your message... (Enter to send, Shift+Enter for newline)"
+                    className="w-full text-xs sm:text-sm min-h-[42px] max-h-32 bg-slate-50 dark:bg-slate-800/80 border-slate-200 dark:border-slate-700 rounded-2xl px-4 py-2.5 resize-none leading-relaxed focus-visible:ring-blue-500"
+                  />
+                </div>
+
+                <Button
+                  type="submit"
                   disabled={!newMessage.trim() || isSending}
-                  className="rounded-full h-11 w-11 bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-600/20 flex-shrink-0"
+                  className="h-[42px] w-[42px] rounded-2xl bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-600/20 shrink-0 flex items-center justify-center p-0 transition-all active:scale-95 disabled:opacity-50"
+                  title="Send Message"
                 >
-                  {isSending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5 ml-0.5" />}
+                  {isSending ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Send className="w-4 h-4 ml-0.5" />
+                  )}
                 </Button>
               </form>
-            </div>
+            </footer>
           </>
         ) : (
-          <div className="flex flex-col items-center justify-center h-full text-slate-400 space-y-4">
-            <div className="w-20 h-20 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center">
-              <MessageSquare className="w-10 h-10 text-slate-300 dark:text-slate-600" />
+          <div className="flex flex-col items-center justify-center h-full text-slate-400 p-8 text-center space-y-3">
+            <div className="w-16 h-16 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400">
+              <MessageSquare className="w-8 h-8" />
             </div>
-            <div className="text-center">
-              <h3 className="text-lg font-medium text-slate-900 dark:text-white mb-1">Your Messages</h3>
-              <p className="text-sm">Select a connection to start chatting</p>
+            <div>
+              <h3 className="text-base font-bold text-slate-800 dark:text-slate-200">
+                Your Direct Messages
+              </h3>
+              <p className="text-xs text-slate-400 mt-1 max-w-xs">
+                {userRole === 'teacher'
+                  ? 'Select an alumni on the left to start a conversation.'
+                  : 'Select an alumni conversation on the left, or visit the Alumni Directory to message a mentor.'}
+              </p>
             </div>
           </div>
         )}
-      </Card>
+      </main>
     </div>
   )
 }

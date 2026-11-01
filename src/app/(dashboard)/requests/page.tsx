@@ -47,11 +47,27 @@ export default function RequestsPage() {
       setUserId(user.id)
 
       const { data: userData, error: userError } = await supabase.from('users').select('role').eq('id', user.id).single()
-      if (userError) throw userError
-      if (userData) setUserRole(userData.role)
+      let role = userData?.role as 'student' | 'alumni' | undefined
+      if (!role || userError) {
+        let { data: profileRole } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', user.id)
+          .maybeSingle()
+        if (!profileRole) {
+          profileRole = (await supabase
+            .from('profiles')
+            .select('role')
+            .eq('user_id', user.id)
+            .maybeSingle()).data
+        }
+        role = profileRole?.role as 'student' | 'alumni' | undefined
+      }
+      if (!role) throw userError || new Error('Your account role is not set.')
+      setUserRole(role)
 
       // Fetch requests for this user
-      const idField = userData?.role === 'alumni' ? 'alumni_id' : 'student_id'
+      const idField = role === 'alumni' ? 'alumni_id' : 'student_id'
       const { data: requestsData, error: requestsError } = await supabase
         .from('requests')
         .select('*')
@@ -64,25 +80,33 @@ export default function RequestsPage() {
         const studentIds = requestsData.map(r => r.student_id)
         const alumniIds = requestsData.map(r => r.alumni_id)
         
-        const { data: studentProfiles, error: studentsError } = await supabase.from('profiles').select('*').in('user_id', studentIds)
-        const { data: alumniProfiles, error: alumniError } = await supabase.from('profiles').select('*').in('user_id', alumniIds)
-        if (studentsError || alumniError) throw studentsError || alumniError
+        const [studentResult, alumniResult] = await Promise.all([
+          studentIds.length
+            ? supabase.from('profiles').select('*').in('id', studentIds)
+            : Promise.resolve({ data: [], error: null }),
+          alumniIds.length
+            ? supabase.from('profiles').select('*').in('id', alumniIds)
+            : Promise.resolve({ data: [], error: null }),
+        ])
+        if (studentResult.error || alumniResult.error) throw studentResult.error || alumniResult.error
+        const studentProfiles = studentResult.data
+        const alumniProfiles = alumniResult.data
 
         const enrichedRequests = requestsData.map(req => ({
           ...req,
-          studentProfile: studentProfiles?.find(p => p.user_id === req.student_id),
-          alumniProfile: alumniProfiles?.find(p => p.user_id === req.alumni_id)
+          studentProfile: studentProfiles?.find(p => p.id === req.student_id || p.user_id === req.student_id),
+          alumniProfile: alumniProfiles?.find(p => p.id === req.alumni_id || p.user_id === req.alumni_id)
         }))
         setRequests(enrichedRequests)
       }
 
       // If student, fetch all alumni for dropdowns
-      if (userData?.role === 'student') {
+      if (role === 'student') {
         const { data: alumniUsers, error: alumniUsersError } = await supabase.from('users').select('id').eq('role', 'alumni')
         if (alumniUsersError) throw alumniUsersError
         if (alumniUsers) {
           const ids = alumniUsers.map(a => a.id)
-          const { data: aProfiles, error: alumniProfilesError } = await supabase.from('profiles').select('*').in('user_id', ids)
+          const { data: aProfiles, error: alumniProfilesError } = await supabase.from('profiles').select('*').in('id', ids)
           if (alumniProfilesError) throw alumniProfilesError
           if (aProfiles) setAvailableAlumni(aProfiles)
         }
@@ -107,7 +131,10 @@ export default function RequestsPage() {
       setRequests(current => current.map(req => req.id === requestId ? { ...req, status: newStatus } : req))
       toast.success(`Request marked as ${newStatus}.`)
     } else {
-      toast.error('Failed to update request', { description: error.message })
+      const description = error.message.includes('column requests.status does not exist')
+        ? 'Apply supabase/migrations/19_request_status_compatibility.sql before changing request statuses.'
+        : error.message
+      toast.error('Failed to update request', { description })
     }
     setUpdatingRequestId(null)
   }

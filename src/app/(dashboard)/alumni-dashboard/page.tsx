@@ -11,12 +11,20 @@ export default async function AlumniDashboardPage() {
     redirect('/login')
   }
 
-  // Fetch user profile
-  const { data: profile } = await supabase
+  // Prefer the deployed legacy key, then support the standardized schema.
+  let { data: profile } = await supabase
     .from('profiles')
     .select('*')
-    .eq('user_id', user.id)
-    .single()
+    .eq('id', user.id)
+    .maybeSingle()
+
+  if (!profile) {
+    profile = (await supabase
+      .from('profiles')
+      .select('*')
+      .eq('user_id', user.id)
+      .maybeSingle()).data
+  }
 
   if (!profile) {
     redirect('/onboarding')
@@ -29,17 +37,23 @@ export default async function AlumniDashboardPage() {
   }
 
   // Fetch connection requests for stats and recent activity
-  const { data: requests } = await supabase
+  const { data: requests, error: requestsError } = await supabase
     .from('requests')
-    .select(`
-      *,
-      student:profiles!student_id(full_name, role, company)
-    `)
+    .select('*')
     .eq('alumni_id', user.id)
     .order('created_at', { ascending: false })
     .limit(5)
 
-  return (
-    <AlumniDashboard profile={profile} requests={requests || []} />
-  )
+  const studentIds = (requests || []).map((request) => request.student_id).filter(Boolean)
+  const { data: students } = studentIds.length
+    ? await supabase.from('profiles').select('*').in('id', studentIds)
+    : { data: [] }
+  const studentMap = new Map((students || []).map((student) => [student.user_id || student.id, student]))
+  const enrichedRequests = (requests || []).map((request) => ({
+    ...request,
+    student: studentMap.get(request.student_id) || null,
+    status: request.status || 'pending',
+  }))
+
+  return <AlumniDashboard profile={profile} requests={requestsError ? [] : enrichedRequests} />
 }

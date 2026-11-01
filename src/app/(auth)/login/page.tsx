@@ -7,33 +7,50 @@ import { createClient } from '@/lib/supabase/client'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import * as z from 'zod'
-import { Loader2, Eye, EyeOff } from 'lucide-react'
+import { Loader2, Eye, EyeOff, AlertCircle } from 'lucide-react'
 import { toast } from 'sonner'
+import { cn } from '@/lib/utils'
 
 const loginSchema = z.object({
-  email: z.string().email({ message: 'Invalid email address' }),
-  password: z.string().min(6, { message: 'Password must be at least 6 characters' }),
+  email: z
+    .string()
+    .min(1, { message: 'Email is required' })
+    .email({ message: 'Please enter a valid email address' }),
+  password: z
+    .string()
+    .min(1, { message: 'Password is required' })
+    .min(6, { message: 'Password must be at least 6 characters' }),
 })
+
+type LoginFormData = z.infer<typeof loginSchema>
 
 export default function LoginPage() {
   const router = useRouter()
   const supabase = createClient()
   const [isLoading, setIsLoading] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
+  const [serverError, setServerError] = useState<string | null>(null)
 
-  const { register, handleSubmit, formState: { errors } } = useForm<z.infer<typeof loginSchema>>({
+  const {
+    register,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<LoginFormData>({
     resolver: zodResolver(loginSchema),
+    mode: 'onTouched',
   })
 
-  const onSubmit = async (data: z.infer<typeof loginSchema>) => {
+  const onSubmit = async (data: LoginFormData) => {
     setIsLoading(true)
-    
+    setServerError(null)
+
     const { error } = await supabase.auth.signInWithPassword({
       email: data.email,
       password: data.password,
     })
 
     if (error) {
+      setServerError(error.message)
       toast.error(error.message)
       setIsLoading(false)
       return
@@ -42,11 +59,23 @@ export default function LoginPage() {
     toast.success('Successfully logged in!')
     const { data: { user } } = await supabase.auth.getUser()
     if (user) {
-      const { data: profile } = await supabase.from('profiles').select('user_id, role').eq('user_id', user.id).single()
+      const userIdProfile = await supabase
+        .from('profiles')
+        .select('user_id, role')
+        .eq('user_id', user.id)
+        .maybeSingle()
+      const profile = userIdProfile.data
+
       if (!profile) {
         router.push('/onboarding')
       } else {
-        router.push(profile.role === 'alumni' ? '/alumni-dashboard' : '/student-dashboard')
+        router.push(
+          profile.role === 'alumni'
+            ? '/alumni-dashboard'
+            : profile.role === 'teacher'
+              ? '/announcements'
+              : '/student-dashboard'
+        )
       }
     } else {
       router.push('/student-dashboard')
@@ -73,8 +102,16 @@ export default function LoginPage() {
         </Link>
       </p>
 
+      {/* Server/Auth Error Alert */}
+      {serverError && (
+        <div className="mb-5 p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2.5 animate-in fade-in">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 text-red-500" />
+          <span className="leading-snug">{serverError}</span>
+        </div>
+      )}
+
       {/* Form */}
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
+      <form onSubmit={handleSubmit(onSubmit)} noValidate className="space-y-5">
         {/* Email */}
         <div>
           <div className="relative">
@@ -83,11 +120,20 @@ export default function LoginPage() {
               type="email"
               placeholder="Email address"
               autoComplete="email"
-              className="w-full h-[52px] px-4 rounded-xl border border-[#d1d5db] bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee] transition-all"
+              className={cn(
+                "w-full h-[52px] px-4 rounded-xl border bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none transition-all",
+                errors.email
+                  ? "border-red-500 focus:ring-2 focus:ring-red-500/20 focus:border-red-500"
+                  : "border-[#d1d5db] focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee]"
+              )}
               {...register('email')}
             />
           </div>
-          {errors.email && <p className="text-xs text-red-500 mt-1.5 ml-1">{errors.email.message}</p>}
+          {errors.email && (
+            <p className="text-xs text-red-500 mt-1.5 ml-1 flex items-center gap-1">
+              {errors.email.message}
+            </p>
+          )}
         </div>
 
         {/* Password */}
@@ -98,7 +144,12 @@ export default function LoginPage() {
               type={showPassword ? 'text' : 'password'}
               placeholder="Password"
               autoComplete="current-password"
-              className="w-full h-[52px] px-4 pr-12 rounded-xl border border-[#d1d5db] bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee] transition-all"
+              className={cn(
+                "w-full h-[52px] px-4 pr-12 rounded-xl border bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none transition-all",
+                errors.password
+                  ? "border-red-500 focus:ring-2 focus:ring-red-500/20 focus:border-red-500"
+                  : "border-[#d1d5db] focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee]"
+              )}
               {...register('password')}
             />
             <button
@@ -110,7 +161,11 @@ export default function LoginPage() {
               {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
             </button>
           </div>
-          {errors.password && <p className="text-xs text-red-500 mt-1.5 ml-1">{errors.password.message}</p>}
+          {errors.password && (
+            <p className="text-xs text-red-500 mt-1.5 ml-1 flex items-center gap-1">
+              {errors.password.message}
+            </p>
+          )}
         </div>
 
         {/* Remember me + Forgot password */}

@@ -1,32 +1,30 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import * as z from 'zod'
-import { Loader2, GraduationCap, Briefcase, ArrowRight, ArrowLeft, Check, Sparkles } from 'lucide-react'
+import { Loader2, GraduationCap, Briefcase, School, ArrowRight, ArrowLeft, Check, Sparkles } from 'lucide-react'
 import { toast } from 'sonner'
 
 const onboardingSchema = z.object({
-  role: z.enum(['student', 'alumni']),
+  role: z.enum(['student', 'alumni', 'teacher']),
   full_name: z.string().min(2, { message: 'Name must be at least 2 characters' }),
   bio: z.string().optional(),
   company: z.string().optional(),
   job_role: z.string().optional(),
   industry: z.string().min(2, { message: 'Industry is required' }),
-  tech_skills: z.string().min(2, { message: 'Please add at least one skill' }),
+  tech_skills: z.string().optional(),
   linkedin_url: z.string().url({ message: 'Must be a valid URL' }).optional().or(z.literal('')),
 })
 
 type FormData = z.infer<typeof onboardingSchema>
 
-const TOTAL_STEPS = 3
-
 export default function OnboardingPage() {
   const router = useRouter()
-  const supabase = createClient()
+  const supabase = useMemo(() => createClient(), [])
   const [isLoading, setIsLoading] = useState(false)
   const [userId, setUserId] = useState<string | null>(null)
   const [currentStep, setCurrentStep] = useState(1)
@@ -47,6 +45,13 @@ export default function OnboardingPage() {
   })
 
   const selectedRole = watch('role')
+  const totalSteps = selectedRole === 'teacher' ? 2 : 3
+
+  useEffect(() => {
+    if (selectedRole === 'teacher' && currentStep > 2) {
+      setCurrentStep(2)
+    }
+  }, [currentStep, selectedRole])
 
   useEffect(() => {
     const checkUser = async () => {
@@ -57,9 +62,30 @@ export default function OnboardingPage() {
       }
       setUserId(user.id)
 
-      const { data: profile } = await supabase.from('profiles').select('user_id, role').eq('user_id', user.id).single()
+      let userIdProfile = await supabase
+        .from('profiles')
+        .select('id, role')
+        .eq('id', user.id)
+        .maybeSingle()
+
+      if (!userIdProfile.data && !userIdProfile.error) {
+        userIdProfile = await supabase
+          .from('profiles')
+          .select('user_id, role')
+          .eq('user_id', user.id)
+          .maybeSingle()
+      }
+
+      const profile = userIdProfile.data
+
       if (profile) {
-        router.push(profile.role === 'alumni' ? '/alumni-dashboard' : '/student-dashboard')
+        router.push(
+          profile.role === 'alumni'
+            ? '/alumni-dashboard'
+            : profile.role === 'teacher'
+              ? '/announcements'
+              : '/student-dashboard'
+        )
       }
     }
     checkUser()
@@ -82,7 +108,7 @@ export default function OnboardingPage() {
     const valid = await trigger(fieldsToValidate)
     if (valid) {
       setDirection('forward')
-      setCurrentStep((s) => Math.min(s + 1, TOTAL_STEPS))
+      setCurrentStep((s) => Math.min(s + 1, totalSteps))
     }
   }
 
@@ -96,33 +122,34 @@ export default function OnboardingPage() {
 
     setIsLoading(true)
 
-    const skillsArray = data.tech_skills.split(',').map(s => s.trim()).filter(Boolean)
+    const skillsArray = (data.tech_skills || '').split(',').map(s => s.trim()).filter(Boolean)
 
-    if (data.role === 'alumni') {
-      const { error: roleError } = await supabase
-        .from('users')
-        .update({ role: 'alumni' })
-        .eq('id', userId)
-
-      if (roleError) {
-        toast.error("Error updating user role: " + roleError.message)
-        setIsLoading(false)
-        return
-      }
-    }
-
-    const { error: profileError } = await supabase
+    // 1. Insert/upsert into core profiles table
+    let profileError = (await supabase
       .from('profiles')
-      .insert({
+      .upsert({
         user_id: userId,
         full_name: data.full_name,
-        bio: data.bio,
-        company: data.role === 'alumni' ? data.company : null,
-        role: data.job_role,
-        industry: data.industry,
-        tech_skills: skillsArray,
-        linkedin_url: data.linkedin_url || null
+        role: data.role,
+        bio: data.bio || null,
+        headline: data.job_role || (data.role === 'alumni' ? 'Alumni' : data.role === 'teacher' ? 'Teacher' : 'Student'),
+        linkedin_url: data.linkedin_url || null,
       })
+    ).error
+
+    if (profileError?.message.includes("'user_id'")) {
+      profileError = (await supabase
+        .from('profiles')
+        .upsert({
+          id: userId,
+          full_name: data.full_name,
+          role: data.role,
+          bio: data.bio || null,
+          headline: data.job_role || (data.role === 'alumni' ? 'Alumni' : data.role === 'teacher' ? 'Teacher' : 'Student'),
+          linkedin_url: data.linkedin_url || null,
+        })
+      ).error
+    }
 
     if (profileError) {
       toast.error(profileError.message)
@@ -130,11 +157,93 @@ export default function OnboardingPage() {
       return
     }
 
+    const { error: roleError } = await supabase
+      .from('users')
+      .update({ role: data.role })
+      .eq('id', userId)
+
+    if (roleError) {
+      toast.error('Unable to save account role', { description: roleError.message })
+      setIsLoading(false)
+      return
+    }
+
+    // 2. Insert/upsert into role-specific tables
+    if (data.role === 'alumni') {
+      const { error: alumniError } = await supabase
+        .from('alumni_profiles')
+        .upsert({
+          profile_id: userId,
+          company: data.company || null,
+          job_title: data.job_role || null,
+          industry: data.industry || null,
+          is_verified: true,
+        })
+
+      if (alumniError) {
+        toast.error('Unable to save alumni profile details', { description: alumniError.message })
+        setIsLoading(false)
+        return
+      }
+    } else if (data.role === 'student') {
+      const { error: studentError } = await supabase
+        .from('student_profiles')
+        .upsert({
+          profile_id: userId,
+          major: data.industry || null,
+          target_role: data.job_role || null,
+        })
+
+      if (studentError) {
+        toast.error('Unable to save student profile details', { description: studentError.message })
+        setIsLoading(false)
+        return
+      }
+    }
+
+    // 3. Link skills for students and alumni.
+    if (data.role !== 'teacher') {
+      try {
+        for (const skillName of skillsArray) {
+          if (!skillName) continue
+          const { data: existingSkill } = await supabase
+            .from('skills')
+            .select('id')
+            .ilike('name', skillName)
+            .maybeSingle()
+
+          let skillId = existingSkill?.id
+          if (!skillId) {
+            const { data: newSkill } = await supabase
+              .from('skills')
+              .insert({ name: skillName })
+              .select('id')
+              .maybeSingle()
+            if (newSkill?.id) skillId = newSkill.id
+          }
+
+          if (skillId) {
+            await supabase
+              .from('profile_skills')
+              .upsert({ profile_id: userId, skill_id: skillId })
+          }
+        }
+      } catch (skillsErr) {
+        console.warn('Skills linking error (non-fatal):', skillsErr)
+      }
+    }
+
     toast.success('Profile created successfully!')
-    router.push(data.role === 'alumni' ? '/alumni-dashboard' : '/student-dashboard')
+    router.push(
+      data.role === 'alumni'
+        ? '/alumni-dashboard'
+        : data.role === 'teacher'
+          ? '/announcements'
+          : '/student-dashboard'
+    )
   }
 
-  const stepLabels = ['Role', 'Details', 'Skills']
+  const stepLabels = selectedRole === 'teacher' ? ['Role', 'Details'] : ['Role', 'Details', 'Skills']
 
   return (
     <div className="w-full max-w-[500px] mx-auto">
@@ -210,7 +319,7 @@ export default function OnboardingPage() {
             <p className="text-[15px] font-semibold text-[#1a1a2e] mb-1">I am a...</p>
             <p className="text-[13px] text-[#6b7280] mb-5">Choose the role that best describes you</p>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               {/* Student Card */}
               <button
                 type="button"
@@ -242,6 +351,36 @@ export default function OnboardingPage() {
                 </div>
               </button>
 
+              {/* Teacher Card */}
+              <button
+                type="button"
+                onClick={() => setValue('role', 'teacher')}
+                className={`group relative p-5 rounded-2xl border-2 text-left transition-all duration-200 ${
+                  selectedRole === 'teacher'
+                    ? 'border-[#4361ee] bg-[#4361ee]/[0.04] shadow-md shadow-[#4361ee]/10'
+                    : 'border-[#e5e7eb] bg-white hover:border-[#c7d0f8] hover:bg-[#f8f9ff]'
+                }`}
+              >
+                <div className={`w-11 h-11 rounded-xl flex items-center justify-center mb-3 transition-colors duration-200 ${
+                  selectedRole === 'teacher'
+                    ? 'bg-[#4361ee] text-white'
+                    : 'bg-[#f0f2ff] text-[#4361ee]'
+                }`}>
+                  <School className="w-5 h-5" />
+                </div>
+                <p className="font-semibold text-[15px] text-[#1a1a2e] mb-0.5">Teacher</p>
+                <p className="text-[12px] text-[#6b7280] leading-relaxed">
+                  Faculty member sharing college updates
+                </p>
+                <div className={`absolute top-3.5 right-3.5 w-5 h-5 rounded-full flex items-center justify-center transition-all duration-200 ${
+                  selectedRole === 'teacher'
+                    ? 'bg-[#4361ee] scale-100'
+                    : 'bg-[#e5e7eb] scale-90'
+                }`}>
+                  {selectedRole === 'teacher' && <Check className="w-3 h-3 text-white" />}
+                </div>
+              </button>
+
               {/* Alumni Card */}
               <button
                 type="button"
@@ -252,10 +391,8 @@ export default function OnboardingPage() {
                     : 'border-[#e5e7eb] bg-white hover:border-[#c7d0f8] hover:bg-[#f8f9ff]'
                 }`}
               >
-                <div className={`w-11 h-11 rounded-xl flex items-center justify-center mb-3 transition-colors duration-200 ${
-                  selectedRole === 'alumni'
-                    ? 'bg-[#4361ee] text-white'
-                    : 'bg-[#f0f2ff] text-[#4361ee]'
+                <div className={`w-11 h-11 rounded-xl flex items-center justify-center mb-3 ${
+                  selectedRole === 'alumni' ? 'bg-[#4361ee] text-white' : 'bg-[#f0f2ff] text-[#4361ee]'
                 }`}>
                   <Briefcase className="w-5 h-5" />
                 </div>
@@ -263,11 +400,8 @@ export default function OnboardingPage() {
                 <p className="text-[12px] text-[#6b7280] leading-relaxed">
                   Working professional & past graduate
                 </p>
-                {/* Check indicator */}
-                <div className={`absolute top-3.5 right-3.5 w-5 h-5 rounded-full flex items-center justify-center transition-all duration-200 ${
-                  selectedRole === 'alumni'
-                    ? 'bg-[#4361ee] scale-100'
-                    : 'bg-[#e5e7eb] scale-90'
+                <div className={`absolute top-3.5 right-3.5 w-5 h-5 rounded-full flex items-center justify-center ${
+                  selectedRole === 'alumni' ? 'bg-[#4361ee]' : 'bg-[#e5e7eb]'
                 }`}>
                   {selectedRole === 'alumni' && <Check className="w-3 h-3 text-white" />}
                 </div>
@@ -289,7 +423,9 @@ export default function OnboardingPage() {
             <p className="text-[13px] text-[#6b7280] mb-5">
               {selectedRole === 'student'
                 ? 'Tell us about yourself and your studies'
-                : 'Tell us about yourself and your career'}
+                : selectedRole === 'teacher'
+                  ? 'Tell us about yourself and your department'
+                  : 'Tell us about yourself and your career'}
             </p>
 
             <div className="space-y-4">
@@ -309,15 +445,15 @@ export default function OnboardingPage() {
               </div>
 
               {/* Conditional fields based on role */}
-              {selectedRole === 'student' ? (
+              {selectedRole !== 'alumni' ? (
                 <div>
                   <label htmlFor="onb-major" className="block text-[13px] font-medium text-[#374151] mb-1.5">
-                    Major / Field of Study
+                    {selectedRole === 'teacher' ? 'Department / Subject' : 'Major / Field of Study'}
                   </label>
                   <input
                     id="onb-major"
                     type="text"
-                    placeholder="e.g. Computer Science"
+                    placeholder={selectedRole === 'teacher' ? 'e.g. Computer Science' : 'e.g. Computer Science'}
                     className="w-full h-[48px] px-4 rounded-xl border border-[#d1d5db] bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee] transition-all"
                     {...register('job_role')}
                   />
@@ -354,7 +490,7 @@ export default function OnboardingPage() {
               {/* Industry */}
               <div>
                 <label htmlFor="onb-industry" className="block text-[13px] font-medium text-[#374151] mb-1.5">
-                  {selectedRole === 'student' ? 'Target Industry' : 'Industry'} <span className="text-red-400">*</span>
+                  {selectedRole === 'student' ? 'Target Industry' : selectedRole === 'teacher' ? 'Department' : 'Industry'} <span className="text-red-400">*</span>
                 </label>
                 <input
                   id="onb-industry"
@@ -382,8 +518,10 @@ export default function OnboardingPage() {
             </div>
           </div>
 
-          {/* Step 3: Skills & Links */}
-          <div
+          {selectedRole !== 'teacher' && (
+            <div>
+              {/* Step 3: Skills & Links */}
+              <div
             className={`transition-all duration-400 ease-out ${
               currentStep === 3
                 ? 'opacity-100 translate-x-0 h-auto'
@@ -455,7 +593,9 @@ export default function OnboardingPage() {
               </div>
             </div>
           </div>
-        </div>
+            </div>
+            )}
+          </div>
 
         {/* Navigation Buttons */}
         <div className="flex items-center gap-3 mt-8">
@@ -470,7 +610,7 @@ export default function OnboardingPage() {
             </button>
           )}
 
-          {currentStep < TOTAL_STEPS ? (
+          {currentStep < totalSteps ? (
             <button
               type="button"
               onClick={nextStep}
@@ -493,7 +633,7 @@ export default function OnboardingPage() {
 
         {/* Step counter */}
         <p className="text-center text-[12px] text-[#9ca3af] mt-4">
-          Step {currentStep} of {TOTAL_STEPS}
+          Step {currentStep} of {totalSteps}
         </p>
       </form>
     </div>

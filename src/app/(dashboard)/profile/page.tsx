@@ -24,7 +24,7 @@ const profileSchema = z.object({
   industry: z.string().min(2, { message: 'Industry is required' }),
   tech_skills: z.string().min(2, { message: 'Please add some skills (comma separated)' }),
   linkedin_url: z.string().url({ message: 'Must be a valid URL' }).optional().or(z.literal('')),
-  graduation_year: z.coerce.number().min(1950, { message: 'Invalid year' }).max(2030, { message: 'Invalid year' }).optional(),
+  graduation_year: z.number().min(1950, { message: 'Invalid year' }).max(2030, { message: 'Invalid year' }).optional(),
   target_roles: z.string().optional(),
 })
 
@@ -33,6 +33,7 @@ export default function ProfilePage() {
   const supabase = useMemo(() => createClient(), [])
   
   const [userId, setUserId] = useState<string | null>(null)
+  const [profileRecordId, setProfileRecordId] = useState<string | null>(null)
   const [userType, setUserType] = useState<'student' | 'alumni' | null>(null)
   
   const [error, setError] = useState<string | null>(null)
@@ -65,14 +66,31 @@ export default function ProfilePage() {
       setUserId(user.id)
       
       const { data: userData, error: userError } = await supabase.from('users').select('role').eq('id', user.id).single()
-      if (userError) setError('Unable to load your account details. Please try again.')
       if (userData) {
         setUserType(userData.role)
       }
 
-      const { data: profile, error: profileError } = await supabase.from('profiles').select('*').eq('user_id', user.id).single()
-      if (profileError) setError('Unable to load your profile. Please refresh the page.')
+      let { data: profile, error: profileError } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', user.id)
+        .maybeSingle()
+      if (!profile && !profileError) {
+        const linkedProfile = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('user_id', user.id)
+          .maybeSingle()
+        profile = linkedProfile.data
+        profileError = linkedProfile.error
+      }
+
+      if (profileError || !profile) setError('Unable to load your profile. Please refresh the page.')
       if (profile) {
+        setProfileRecordId(profile.id)
+        if (userError) {
+          setUserType(profile.role === 'alumni' ? 'alumni' : 'student')
+        }
         reset({
           full_name: profile.full_name,
           bio: profile.bio || '',
@@ -116,7 +134,7 @@ export default function ProfilePage() {
         graduation_year: data.graduation_year || null,
         target_roles: targetRolesArray.length > 0 ? targetRolesArray : null,
       })
-      .eq('user_id', userId)
+      .eq('id', profileRecordId || userId)
 
     if (profileError) {
       setError(profileError.message)
@@ -167,7 +185,7 @@ export default function ProfilePage() {
     const { error: updateError } = await supabase
       .from('profiles')
       .update({ avatar_url: urlWithCacheBust })
-      .eq('user_id', userId)
+      .eq('id', profileRecordId || userId)
 
     if (updateError) {
       toast.error('Failed to save avatar', { description: updateError.message })
@@ -187,7 +205,7 @@ export default function ProfilePage() {
     const { error: updateError } = await supabase
       .from('profiles')
       .update({ avatar_url: null })
-      .eq('user_id', userId)
+      .eq('id', profileRecordId || userId)
 
     if (updateError) {
       toast.error('Failed to remove photo', { description: updateError.message })
@@ -429,7 +447,7 @@ export default function ProfilePage() {
                           type="number"
                           className="pl-9 bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 h-11"
                           placeholder="2024"
-                          {...register('graduation_year')}
+                          {...register('graduation_year', { valueAsNumber: true })}
                         />
                       </div>
                       {errors.graduation_year && <p className="text-xs text-red-500 font-medium">{errors.graduation_year.message}</p>}

@@ -1,4 +1,4 @@
-export type UserRole = 'student' | 'alumni' | 'admin'
+export type UserRole = 'student' | 'alumni' | 'admin' | 'teacher'
 
 export interface Profile {
   user_id: string
@@ -73,4 +73,22 @@ export interface AlumniAvailability {
   start_time: string
   end_time: string
   is_booked: boolean
+}
+
+export type AnnouncementPriority = 'normal' | 'important' | 'urgent'
+
+export interface Announcement {
+  id: string
+  author_id: string
+  title: string
+  content: string
+  poster_url?: string | null
+  event_date?: string | null
+  priority: AnnouncementPriority
+  created_at: string
+  updated_at?: string
+  // Joined fields
+  author_profile?: Profile
+  author?: { full_name: string }
+  teacher_details?: { department?: string | null; title?: string | null }
 }

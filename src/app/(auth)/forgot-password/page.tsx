@@ -7,31 +7,45 @@ import { createClient } from '@/lib/supabase/client'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import * as z from 'zod'
-import { Loader2 } from 'lucide-react'
+import { Loader2, AlertCircle } from 'lucide-react'
 import { toast } from 'sonner'
+import { cn } from '@/lib/utils'
 
 const forgotPasswordSchema = z.object({
-  email: z.string().email({ message: 'Invalid email address' }),
+  email: z
+    .string()
+    .min(1, { message: 'Email is required' })
+    .email({ message: 'Please enter a valid email address' }),
 })
+
+type ForgotPasswordFormData = z.infer<typeof forgotPasswordSchema>
 
 export default function ForgotPasswordPage() {
   const router = useRouter()
   const supabase = createClient()
   const [isLoading, setIsLoading] = useState(false)
   const [success, setSuccess] = useState(false)
+  const [serverError, setServerError] = useState<string | null>(null)
 
-  const { register, handleSubmit, formState: { errors } } = useForm<z.infer<typeof forgotPasswordSchema>>({
+  const {
+    register,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<ForgotPasswordFormData>({
     resolver: zodResolver(forgotPasswordSchema),
+    mode: 'onTouched',
   })
 
-  const onSubmit = async (data: z.infer<typeof forgotPasswordSchema>) => {
+  const onSubmit = async (data: ForgotPasswordFormData) => {
     setIsLoading(true)
+    setServerError(null)
     
     const { error } = await supabase.auth.resetPasswordForEmail(data.email, {
       redirectTo: `${window.location.origin}/reset-password`,
     })
 
     if (error) {
+      setServerError(error.message)
       toast.error(error.message)
       setIsLoading(false)
       return
@@ -95,8 +109,16 @@ export default function ForgotPasswordPage() {
         Enter your email address and we&apos;ll send you a link to reset your password.
       </p>
 
+      {/* Server error alert */}
+      {serverError && (
+        <div className="mb-5 p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2.5 animate-in fade-in">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 text-red-500" />
+          <span className="leading-snug">{serverError}</span>
+        </div>
+      )}
+
       {/* Form */}
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
+      <form onSubmit={handleSubmit(onSubmit)} noValidate className="space-y-5">
         {/* Email */}
         <div>
           <div className="relative">
@@ -105,11 +127,20 @@ export default function ForgotPasswordPage() {
               type="email"
               placeholder="Email address"
               autoComplete="email"
-              className="w-full h-[52px] px-4 rounded-xl border border-[#d1d5db] bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee] transition-all"
+              className={cn(
+                "w-full h-[52px] px-4 rounded-xl border bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none transition-all",
+                errors.email
+                  ? "border-red-500 focus:ring-2 focus:ring-red-500/20 focus:border-red-500"
+                  : "border-[#d1d5db] focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee]"
+              )}
               {...register('email')}
             />
           </div>
-          {errors.email && <p className="text-xs text-red-500 mt-1.5 ml-1">{errors.email.message}</p>}
+          {errors.email && (
+            <p className="text-xs text-red-500 mt-1.5 ml-1 flex items-center gap-1">
+              {errors.email.message}
+            </p>
+          )}
         </div>
 
         {/* Submit button */}

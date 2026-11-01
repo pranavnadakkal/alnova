@@ -7,17 +7,28 @@ import { createClient } from '@/lib/supabase/client'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import * as z from 'zod'
-import { Loader2, Eye, EyeOff } from 'lucide-react'
+import { Loader2, Eye, EyeOff, AlertCircle } from 'lucide-react'
 import { toast } from 'sonner'
+import { cn } from '@/lib/utils'
 
 const registerSchema = z.object({
-  email: z.string().email({ message: 'Invalid email address' }),
-  password: z.string().min(6, { message: 'Password must be at least 6 characters' }),
-  confirmPassword: z.string()
+  email: z
+    .string()
+    .min(1, { message: 'Email is required' })
+    .email({ message: 'Please enter a valid email address' }),
+  password: z
+    .string()
+    .min(1, { message: 'Password is required' })
+    .min(6, { message: 'Password must be at least 6 characters' }),
+  confirmPassword: z
+    .string()
+    .min(1, { message: 'Please confirm your password' }),
 }).refine((data) => data.password === data.confirmPassword, {
   message: "Passwords don't match",
   path: ["confirmPassword"],
 })
+
+type RegisterFormData = z.infer<typeof registerSchema>
 
 export default function RegisterPage() {
   const router = useRouter()
@@ -26,13 +37,20 @@ export default function RegisterPage() {
   const [success, setSuccess] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const [showConfirm, setShowConfirm] = useState(false)
+  const [serverError, setServerError] = useState<string | null>(null)
 
-  const { register, handleSubmit, formState: { errors } } = useForm<z.infer<typeof registerSchema>>({
+  const {
+    register,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<RegisterFormData>({
     resolver: zodResolver(registerSchema),
+    mode: 'onTouched',
   })
 
-  const onSubmit = async (data: z.infer<typeof registerSchema>) => {
+  const onSubmit = async (data: RegisterFormData) => {
     setIsLoading(true)
+    setServerError(null)
     
     const { error } = await supabase.auth.signUp({
       email: data.email,
@@ -43,6 +61,7 @@ export default function RegisterPage() {
     })
 
     if (error) {
+      setServerError(error.message)
       toast.error(error.message)
       setIsLoading(false)
       return
@@ -109,8 +128,16 @@ export default function RegisterPage() {
         </Link>
       </p>
 
+      {/* Server error alert */}
+      {serverError && (
+        <div className="mb-5 p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2.5 animate-in fade-in">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 text-red-500" />
+          <span className="leading-snug">{serverError}</span>
+        </div>
+      )}
+
       {/* Form */}
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
+      <form onSubmit={handleSubmit(onSubmit)} noValidate className="space-y-5">
         {/* Email */}
         <div>
           <div className="relative">
@@ -119,11 +146,20 @@ export default function RegisterPage() {
               type="email"
               placeholder="Email address"
               autoComplete="email"
-              className="w-full h-[52px] px-4 rounded-xl border border-[#d1d5db] bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee] transition-all"
+              className={cn(
+                "w-full h-[52px] px-4 rounded-xl border bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none transition-all",
+                errors.email
+                  ? "border-red-500 focus:ring-2 focus:ring-red-500/20 focus:border-red-500"
+                  : "border-[#d1d5db] focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee]"
+              )}
               {...register('email')}
             />
           </div>
-          {errors.email && <p className="text-xs text-red-500 mt-1.5 ml-1">{errors.email.message}</p>}
+          {errors.email && (
+            <p className="text-xs text-red-500 mt-1.5 ml-1 flex items-center gap-1">
+              {errors.email.message}
+            </p>
+          )}
         </div>
 
         {/* Password */}
@@ -134,7 +170,12 @@ export default function RegisterPage() {
               type={showPassword ? 'text' : 'password'}
               placeholder="Password"
               autoComplete="new-password"
-              className="w-full h-[52px] px-4 pr-12 rounded-xl border border-[#d1d5db] bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee] transition-all"
+              className={cn(
+                "w-full h-[52px] px-4 pr-12 rounded-xl border bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none transition-all",
+                errors.password
+                  ? "border-red-500 focus:ring-2 focus:ring-red-500/20 focus:border-red-500"
+                  : "border-[#d1d5db] focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee]"
+              )}
               {...register('password')}
             />
             <button
@@ -146,8 +187,14 @@ export default function RegisterPage() {
               {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
             </button>
           </div>
-          {errors.password && <p className="text-xs text-red-500 mt-1.5 ml-1">{errors.password.message}</p>}
-          <p className="text-xs text-[#9ca3af] mt-1.5 ml-1">Must be at least 6 characters</p>
+          {errors.password && (
+            <p className="text-xs text-red-500 mt-1.5 ml-1 flex items-center gap-1">
+              {errors.password.message}
+            </p>
+          )}
+          {!errors.password && (
+            <p className="text-xs text-[#9ca3af] mt-1.5 ml-1">Must be at least 6 characters</p>
+          )}
         </div>
 
         {/* Confirm Password */}
@@ -158,7 +205,12 @@ export default function RegisterPage() {
               type={showConfirm ? 'text' : 'password'}
               placeholder="Confirm password"
               autoComplete="new-password"
-              className="w-full h-[52px] px-4 pr-12 rounded-xl border border-[#d1d5db] bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee] transition-all"
+              className={cn(
+                "w-full h-[52px] px-4 pr-12 rounded-xl border bg-white text-[#1a1a2e] placeholder:text-[#9ca3af] text-sm focus:outline-none transition-all",
+                errors.confirmPassword
+                  ? "border-red-500 focus:ring-2 focus:ring-red-500/20 focus:border-red-500"
+                  : "border-[#d1d5db] focus:ring-2 focus:ring-[#4361ee]/30 focus:border-[#4361ee]"
+              )}
               {...register('confirmPassword')}
             />
             <button
@@ -170,7 +222,11 @@ export default function RegisterPage() {
               {showConfirm ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
             </button>
           </div>
-          {errors.confirmPassword && <p className="text-xs text-red-500 mt-1.5 ml-1">{errors.confirmPassword.message}</p>}
+          {errors.confirmPassword && (
+            <p className="text-xs text-red-500 mt-1.5 ml-1 flex items-center gap-1">
+              {errors.confirmPassword.message}
+            </p>
+          )}
         </div>
 
         {/* Terms */}

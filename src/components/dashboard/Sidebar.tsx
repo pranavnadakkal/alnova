@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { LayoutDashboard, Users, MessageSquare, FileText, Calendar, Settings, ChevronLeft, ChevronRight } from 'lucide-react'
+import { LayoutDashboard, Users, MessageSquare, FileText, Settings, ChevronLeft, ChevronRight, Megaphone, GraduationCap, ShieldCheck } from 'lucide-react'
 import { useState } from 'react'
 
 interface SidebarProps {
@@ -10,10 +10,11 @@ interface SidebarProps {
 }
 
 const studentNav = [
-  { label: 'Dashboard', href: '/student-dashboard', icon: LayoutDashboard },
-  { label: 'Directory', href: '/directory', icon: Users },
-  { label: 'Requests', href: '/requests', icon: FileText },
+  { label: 'Dashboard', href: '/dashboard/student', icon: LayoutDashboard },
+  { label: 'Alumni Directory', href: '/alumni', icon: Users },
+  { label: 'Session Tracker', href: '/dashboard/student/sessions', icon: GraduationCap },
   { label: 'Messages', href: '/messages', icon: MessageSquare },
+  { label: 'Announcements', href: '/announcements', icon: Megaphone },
   { label: 'Profile', href: '/profile', icon: Settings },
 ]
 
@@ -21,14 +22,26 @@ const alumniNav = [
   { label: 'Dashboard', href: '/alumni-dashboard', icon: LayoutDashboard },
   { label: 'Directory', href: '/directory', icon: Users },
   { label: 'Requests', href: '/requests', icon: FileText },
+  { label: 'Announcements', href: '/announcements', icon: Megaphone },
   { label: 'Messages', href: '/messages', icon: MessageSquare },
+  { label: 'Profile', href: '/profile', icon: Settings },
+]
+
+const teacherNav = [
+  { label: 'Dashboard', href: '/teacher-dashboard', icon: LayoutDashboard },
+  { label: 'Announcements', href: '/announcements', icon: Megaphone },
+  { label: 'Profile', href: '/profile', icon: Settings },
+]
+
+const adminNav = [
+  { label: 'Admin Portal', href: '/dashboard/admin', icon: ShieldCheck },
   { label: 'Profile', href: '/profile', icon: Settings },
 ]
 
 export default function Sidebar({ role }: SidebarProps) {
   const pathname = usePathname()
   const [collapsed, setCollapsed] = useState(false)
-  const navItems = role === 'alumni' ? alumniNav : studentNav
+  const navItems = role === 'admin' ? adminNav : role === 'alumni' ? alumniNav : role === 'teacher' ? teacherNav : studentNav
 
   return (
     <aside
@@ -49,7 +62,7 @@ export default function Sidebar({ role }: SidebarProps) {
 
       {/* Logo */}
       <div className={`px-5 py-6 border-b border-slate-100 dark:border-slate-800 ${collapsed ? 'flex justify-center' : ''}`}>
-        <Link href={role === 'alumni' ? '/alumni-dashboard' : '/student-dashboard'} className="flex items-center gap-2.5">
+        <Link href={role === 'alumni' ? '/alumni-dashboard' : role === 'teacher' ? '/announcements' : '/student-dashboard'} className="flex items-center gap-2.5">
           <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-600 to-blue-700 flex items-center justify-center shadow-lg shadow-blue-600/25 flex-shrink-0">
             <span className="text-white font-bold text-sm tracking-tight">A</span>
           </div>
