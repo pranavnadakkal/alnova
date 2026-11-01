@@ -1,6 +1,12 @@
 -- Replace legacy recursive conversation policies with direct ownership checks.
 ALTER TABLE public.conversations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.conversation_participants ENABLE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+  IF to_regclass('public.conversation_participants') IS NOT NULL THEN
+    EXECUTE 'ALTER TABLE public.conversation_participants ENABLE ROW LEVEL SECURITY';
+  END IF;
+END
+$$;
 
 DO $$
 DECLARE
@@ -28,16 +34,25 @@ CREATE POLICY conversations_select
   TO authenticated
   USING (student_id = auth.uid() OR alumni_id = auth.uid());
 
-CREATE POLICY conversation_participants_select
-  ON public.conversation_participants
-  FOR SELECT
-  TO authenticated
-  USING (profile_id = auth.uid());
-
-CREATE POLICY conversation_participants_insert
-  ON public.conversation_participants
-  FOR INSERT
-  TO authenticated
-  WITH CHECK (profile_id = auth.uid());
+DO $$
+BEGIN
+  IF to_regclass('public.conversation_participants') IS NOT NULL THEN
+    EXECUTE $policy$
+      CREATE POLICY conversation_participants_select
+        ON public.conversation_participants
+        FOR SELECT
+        TO authenticated
+        USING (profile_id = auth.uid())
+    $policy$;
+    EXECUTE $policy$
+      CREATE POLICY conversation_participants_insert
+        ON public.conversation_participants
+        FOR INSERT
+        TO authenticated
+        WITH CHECK (profile_id = auth.uid())
+    $policy$;
+  END IF;
+END
+$$;
 
 NOTIFY pgrst, 'reload schema';
