@@ -11,7 +11,7 @@ ALTER TABLE public.profiles
   ADD COLUMN IF NOT EXISTS open_to_referrals BOOLEAN DEFAULT true;
 
 -- 2. Conversations table
-CREATE TABLE public.conversations (
+CREATE TABLE IF NOT EXISTS public.conversations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   student_id UUID REFERENCES public.users(id) NOT NULL,
   alumni_id UUID REFERENCES public.users(id) NOT NULL,
@@ -21,6 +21,9 @@ CREATE TABLE public.conversations (
 
 ALTER TABLE public.conversations ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Students can view their conversations" ON public.conversations;
+DROP POLICY IF EXISTS "Alumni can view their conversations" ON public.conversations;
+DROP POLICY IF EXISTS "Authenticated users can create conversations" ON public.conversations;
 CREATE POLICY "Students can view their conversations"
   ON public.conversations FOR SELECT
   USING (auth.uid() = student_id);
@@ -35,7 +38,7 @@ CREATE POLICY "Authenticated users can create conversations"
   WITH CHECK (auth.uid() = student_id OR auth.uid() = alumni_id);
 
 -- 3. Messages table
-CREATE TABLE public.messages (
+CREATE TABLE IF NOT EXISTS public.messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   conversation_id UUID REFERENCES public.conversations(id) ON DELETE CASCADE NOT NULL,
   sender_id UUID REFERENCES public.users(id) NOT NULL,
@@ -46,6 +49,9 @@ CREATE TABLE public.messages (
 
 ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Conversation participants can view messages" ON public.messages;
+DROP POLICY IF EXISTS "Conversation participants can send messages" ON public.messages;
+DROP POLICY IF EXISTS "Recipients can mark messages as read" ON public.messages;
 CREATE POLICY "Conversation participants can view messages"
   ON public.messages FOR SELECT
   USING (
@@ -80,10 +86,10 @@ CREATE POLICY "Recipients can mark messages as read"
   );
 
 -- Index for fast message retrieval
-CREATE INDEX idx_messages_conversation_id ON public.messages(conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON public.messages(conversation_id, created_at);
 
 -- 4. Mentorship Sessions table
-CREATE TABLE public.mentorship_sessions (
+CREATE TABLE IF NOT EXISTS public.mentorship_sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   student_id UUID REFERENCES public.users(id) NOT NULL,
   alumni_id UUID REFERENCES public.users(id) NOT NULL,
@@ -96,6 +102,10 @@ CREATE TABLE public.mentorship_sessions (
 
 ALTER TABLE public.mentorship_sessions ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Students can view their sessions" ON public.mentorship_sessions;
+DROP POLICY IF EXISTS "Alumni can view sessions assigned to them" ON public.mentorship_sessions;
+DROP POLICY IF EXISTS "Students can create sessions" ON public.mentorship_sessions;
+DROP POLICY IF EXISTS "Alumni can update session status" ON public.mentorship_sessions;
 CREATE POLICY "Students can view their sessions"
   ON public.mentorship_sessions FOR SELECT
   USING (auth.uid() = student_id);
@@ -115,7 +125,7 @@ CREATE POLICY "Alumni can update session status"
   USING (auth.uid() = alumni_id);
 
 -- 5. Alumni Availability table
-CREATE TABLE public.alumni_availability (
+CREATE TABLE IF NOT EXISTS public.alumni_availability (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   alumni_id UUID REFERENCES public.users(id) NOT NULL,
   available_date DATE NOT NULL,
@@ -126,6 +136,10 @@ CREATE TABLE public.alumni_availability (
 
 ALTER TABLE public.alumni_availability ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Anyone can view alumni availability" ON public.alumni_availability;
+DROP POLICY IF EXISTS "Alumni can manage their availability" ON public.alumni_availability;
+DROP POLICY IF EXISTS "Alumni can update their availability" ON public.alumni_availability;
+DROP POLICY IF EXISTS "Alumni can delete their availability" ON public.alumni_availability;
 CREATE POLICY "Anyone can view alumni availability"
   ON public.alumni_availability FOR SELECT
   USING (true);
@@ -146,4 +160,16 @@ CREATE POLICY "Alumni can delete their availability"
   USING (auth.uid() = alumni_id);
 
 -- Enable Realtime for messages (so clients get instant updates)
-ALTER PUBLICATION supabase_realtime ADD TABLE public.messages;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime'
+      AND schemaname = 'public'
+      AND tablename = 'messages'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.messages;
+  END IF;
+END
+$$;

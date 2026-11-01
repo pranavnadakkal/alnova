@@ -28,6 +28,35 @@ EXCEPTION
   WHEN duplicate_object THEN null;
 END $$;
 
+DO $$
+DECLARE
+  policy_record RECORD;
+BEGIN
+  FOR policy_record IN
+    SELECT schemaname, tablename, policyname
+    FROM pg_policies
+    WHERE schemaname = 'public'
+      AND tablename IN (
+        'skills',
+        'student_profiles',
+        'alumni_profiles',
+        'profile_skills',
+        'conversation_participants',
+        'mentorship_sessions',
+        'resume_reviews',
+        'referral_requests'
+      )
+  LOOP
+    EXECUTE format(
+      'DROP POLICY IF EXISTS %I ON %I.%I',
+      policy_record.policyname,
+      policy_record.schemaname,
+      policy_record.tablename
+    );
+  END LOOP;
+END
+$$;
+
 -- 2. Skills Table
 CREATE TABLE IF NOT EXISTS public.skills (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -183,5 +212,25 @@ CREATE POLICY "Participants can update referral requests"
   USING (auth.uid() = student_id OR auth.uid() = alumni_id);
 
 -- 10. Enable Realtime Publications
-ALTER PUBLICATION supabase_realtime ADD TABLE public.messages;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.mentorship_sessions;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime'
+      AND schemaname = 'public'
+      AND tablename = 'messages'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.messages;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime'
+      AND schemaname = 'public'
+      AND tablename = 'mentorship_sessions'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.mentorship_sessions;
+  END IF;
+END
+$$;
