@@ -1,7 +1,13 @@
 -- Create Users table (extends auth.users from Supabase)
-CREATE TYPE user_role AS ENUM ('student', 'alumni', 'admin');
+DO $$
+BEGIN
+  CREATE TYPE public.user_role AS ENUM ('student', 'alumni', 'admin');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END
+$$;
 
-CREATE TABLE public.users (
+CREATE TABLE IF NOT EXISTS public.users (
   id UUID REFERENCES auth.users(id) PRIMARY KEY,
   role user_role NOT NULL DEFAULT 'student',
   email TEXT NOT NULL UNIQUE,
@@ -9,7 +15,7 @@ CREATE TABLE public.users (
 );
 
 -- Create Profiles table
-CREATE TABLE public.profiles (
+CREATE TABLE IF NOT EXISTS public.profiles (
   user_id UUID REFERENCES public.users(id) PRIMARY KEY,
   full_name TEXT NOT NULL,
   bio TEXT,
@@ -21,10 +27,23 @@ CREATE TABLE public.profiles (
 );
 
 -- Create Requests table
-CREATE TYPE request_type AS ENUM ('mentorship', 'resume', 'referral');
-CREATE TYPE request_status AS ENUM ('pending', 'accepted', 'completed', 'declined', 'reviewing', 'referred', 'rejected');
+DO $$
+BEGIN
+  CREATE TYPE public.request_type AS ENUM ('mentorship', 'resume', 'referral');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END
+$$;
 
-CREATE TABLE public.requests (
+DO $$
+BEGIN
+  CREATE TYPE public.request_status AS ENUM ('pending', 'accepted', 'completed', 'declined', 'reviewing', 'referred', 'rejected');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END
+$$;
+
+CREATE TABLE IF NOT EXISTS public.requests (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   student_id UUID REFERENCES public.users(id) NOT NULL,
   alumni_id UUID REFERENCES public.users(id) NOT NULL,
@@ -41,17 +60,28 @@ ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.requests ENABLE ROW LEVEL SECURITY;
 
 -- Policies for public.users
+DROP POLICY IF EXISTS "Users can view their own record" ON public.users;
+DROP POLICY IF EXISTS "Users can insert their own record" ON public.users;
+DROP POLICY IF EXISTS "Users can update their own record" ON public.users;
+DROP POLICY IF EXISTS "Public profiles can view any user role" ON public.users;
 CREATE POLICY "Users can view their own record" ON public.users FOR SELECT USING (auth.uid() = id);
 CREATE POLICY "Users can insert their own record" ON public.users FOR INSERT WITH CHECK (auth.uid() = id);
 CREATE POLICY "Users can update their own record" ON public.users FOR UPDATE USING (auth.uid() = id);
 CREATE POLICY "Public profiles can view any user role" ON public.users FOR SELECT USING (true);
 
 -- Policies for public.profiles
+DROP POLICY IF EXISTS "Profiles are viewable by everyone" ON public.profiles;
+DROP POLICY IF EXISTS "Users can insert their own profile" ON public.profiles;
+DROP POLICY IF EXISTS "Users can update their own profile" ON public.profiles;
 CREATE POLICY "Profiles are viewable by everyone" ON public.profiles FOR SELECT USING (true);
 CREATE POLICY "Users can insert their own profile" ON public.profiles FOR INSERT WITH CHECK (auth.uid() = user_id);
 CREATE POLICY "Users can update their own profile" ON public.profiles FOR UPDATE USING (auth.uid() = user_id);
 
 -- Policies for public.requests
+DROP POLICY IF EXISTS "Students can view their requests" ON public.requests;
+DROP POLICY IF EXISTS "Alumni can view requests sent to them" ON public.requests;
+DROP POLICY IF EXISTS "Students can create requests" ON public.requests;
+DROP POLICY IF EXISTS "Alumni can update request status" ON public.requests;
 CREATE POLICY "Students can view their requests" ON public.requests FOR SELECT USING (auth.uid() = student_id);
 CREATE POLICY "Alumni can view requests sent to them" ON public.requests FOR SELECT USING (auth.uid() = alumni_id);
 CREATE POLICY "Students can create requests" ON public.requests FOR INSERT WITH CHECK (auth.uid() = student_id);
@@ -67,6 +97,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE PROCEDURE public.handle_new_user();
