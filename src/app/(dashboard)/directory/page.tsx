@@ -148,21 +148,19 @@ export default function DirectoryPage() {
           // Fetch connected students for alumni
           const requestResult = await tablesDB.listRows(databaseId, 'requests', [
             Query.equal('alumniId', user.$id),
+            Query.equal('status', 'accepted'),
             Query.limit(5000),
           ])
-          const allowedStatuses = new Set(['accepted', 'completed', 'reviewing', 'referred', 'pending'])
-          const requests = requestResult.rows
-            .filter((request) => allowedStatuses.has(request.status || 'pending'))
-            .map((request) => ({
-              id: request.$id,
-              student_id: request.studentId,
-              alumni_id: request.alumniId,
-              type: request.type,
-              status: request.status || 'pending',
-              message: request.message || '',
-              document_url: request.documentUrl || null,
-              created_at: request.$createdAt,
-            } as ConnectionRequest))
+          const requests = requestResult.rows.map((request) => ({
+            id: request.$id,
+            student_id: request.studentId,
+            alumni_id: request.alumniId,
+            type: request.type,
+            status: request.status || 'pending',
+            message: request.message || '',
+            document_url: request.documentUrl || null,
+            created_at: request.$createdAt,
+          } as ConnectionRequest))
 
           if (requests.length > 0) {
             const studentIds = [...new Set(requests.map((request) => request.student_id))]
@@ -477,7 +475,7 @@ export default function DirectoryPage() {
             </p>
             <p className="text-slate-400 dark:text-slate-500 mt-1 text-sm max-w-sm mx-auto">
               {connectedStudents.length === 0
-                ? 'When students send you mentorship or referral requests, they will appear here.'
+                ? 'Students whose requests you accept will appear here.'
                 : 'Try adjusting your search or filter criteria.'}
             </p>
           </div>

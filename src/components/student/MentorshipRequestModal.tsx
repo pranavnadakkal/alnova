@@ -2,7 +2,8 @@
 
 import { useState, useEffect } from 'react'
 import { tablesDB } from '@/lib/appwrite/client'
-import { ID, Query } from 'appwrite'
+import { Query } from 'appwrite'
+import { sendMentorshipRequest } from '@/app/(dashboard)/requests/actions'
 import {
   Dialog,
   DialogContent,
@@ -129,33 +130,12 @@ export default function MentorshipRequestModal({
 
     setIsSubmitting(true)
     try {
-      // 1. Insert into mentorship_sessions table
-      await tablesDB.createRow(
-        process.env.NEXT_PUBLIC_DATABASE_ID!,
-        'mentorship_sessions',
-        ID.unique(),
-        {
-          studentId,
-          alumniId: alumni.id,
-          topic,
-          pitch: pitch.trim(),
-          message: pitch.trim(),
-          scheduledAt: proposedDate ? new Date(proposedDate).toISOString() : null,
-          status: 'pending',
-        },
-      )
-      await tablesDB.createRow(
-        process.env.NEXT_PUBLIC_DATABASE_ID!,
-        'requests',
-        ID.unique(),
-        {
-          studentId,
-          alumniId: alumni.id,
-          type: 'mentorship',
-          message: `${topic}: ${pitch.trim()}`,
-          status: 'pending',
-        },
-      )
+      await sendMentorshipRequest({
+        alumniId: alumni.id,
+        topic,
+        pitch: pitch.trim(),
+        proposedDate,
+      })
 
       toast.success('Mentorship request sent successfully!')
       setPitch('')

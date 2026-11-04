@@ -20,6 +20,7 @@ export async function createSessionClient() {
   const appwriteTables = new TablesDB(client);
   const permissions = {
     read: (role: string) => Permission.read(role),
+    write: (role: string) => Permission.write(role),
     update: (role: string) => Permission.update(role),
     delete: (role: string) => Permission.delete(role),
     user: (userId: string) => Role.user(userId),
@@ -75,6 +76,7 @@ export function createAdminClient() {
   const appwriteTables = new TablesDB(client);
   const permissions = {
     read: (role: string) => Permission.read(role),
+    write: (role: string) => Permission.write(role),
     update: (role: string) => Permission.update(role),
     delete: (role: string) => Permission.delete(role),
     user: (userId: string) => Role.user(userId),

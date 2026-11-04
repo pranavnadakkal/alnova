@@ -176,7 +176,7 @@ function AlumniDirectoryContent() {
           const currentSkills = skillsMap.get(profileId) || []
 
           return {
-            id: profileId,
+            id: alumniUserId,
             user_id: alumniUserId,
             full_name: profile?.fullName || 'Alumni Member',
             avatar_url: profile?.avatarUrl,

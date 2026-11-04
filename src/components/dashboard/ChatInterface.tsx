@@ -4,7 +4,8 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { client, tablesDB } from '@/lib/appwrite/client'
 import { APPWRITE_TABLE_IDS } from '@/lib/appwrite/tables'
-import { ID, Query } from 'appwrite'
+import { Query } from 'appwrite'
+import { getOrCreateConversation, sendChatMessage } from '@/app/(dashboard)/messages/actions'
 import { Profile } from '@/types'
 import {
   Search,
@@ -282,25 +283,7 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
 
     if (!currentConn.conversationId) {
       try {
-        const student_id = userRole === 'alumni' ? currentConn.profile.user_id : userId
-        const alumni_id = userRole === 'alumni' ? userId : currentConn.profile.user_id
-
-        const existing = await tablesDB.listRows(
-          process.env.NEXT_PUBLIC_DATABASE_ID!,
-          'conversations',
-          [
-            Query.equal('studentId', student_id),
-            Query.equal('alumniId', alumni_id),
-            Query.limit(1),
-          ],
-        )
-        const conversation = existing.rows[0] || await tablesDB.createRow(
-          process.env.NEXT_PUBLIC_DATABASE_ID!,
-          'conversations',
-          ID.unique(),
-          { studentId: student_id, alumniId: alumni_id },
-        )
-        currentConn.conversationId = conversation.$id
+        currentConn.conversationId = await getOrCreateConversation(currentConn.profile.user_id)
 
         setConnections((prev) =>
           prev.map((c) => (c.profile.user_id === currentConn.profile.user_id ? currentConn : c))
@@ -361,18 +344,7 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
     )
 
     try {
-      const data = await tablesDB.createRow(
-        process.env.NEXT_PUBLIC_DATABASE_ID!,
-        'messages',
-        ID.unique(),
-        {
-          conversationId,
-          senderId: userId,
-          studentId: userRole === 'alumni' ? activeConnection.profile.user_id : userId,
-          alumniId: userRole === 'alumni' ? userId : activeConnection.profile.user_id,
-          content,
-        },
-      )
+      const data = await sendChatMessage({ conversationId, content })
 
       // Replace optimistic message with confirmed row
       if (data) {

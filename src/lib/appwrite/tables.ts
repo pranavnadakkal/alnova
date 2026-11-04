@@ -24,6 +24,7 @@ export type AppwriteRowData = Record<
 
 type PermissionFactory = {
   read: (role: string) => string
+  write: (role: string) => string
   update: (role: string) => string
   delete: (role: string) => string
   user: (userId: string) => string
@@ -78,7 +79,11 @@ export function getRowPermissions(
       }
       for (const id of new Set(participants)) {
         grantUser('read', id)
-        grantUser('update', id)
+        if (tableName === 'conversations' || tableName === 'messages') {
+          if (id) permissions.add(permission.write(permission.user(id)))
+        } else {
+          grantUser('update', id)
+        }
       }
       break
     }

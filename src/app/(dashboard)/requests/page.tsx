@@ -13,6 +13,7 @@ import { ConnectionRequest, Profile, RequestStatus } from '@/types'
 import { Loader2 } from 'lucide-react'
 import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from 'sonner'
+import { updateMentorshipRequestStatus } from './actions'
 
 type ExtendedRequest = ConnectionRequest & {
   studentProfile?: Profile
@@ -115,12 +116,20 @@ export default function RequestsPage() {
   const updateRequestStatus = async (requestId: string, newStatus: RequestStatus) => {
     setUpdatingRequestId(requestId)
     try {
-      await tablesDB.updateRow(
-        process.env.NEXT_PUBLIC_DATABASE_ID!,
-        'requests',
-        requestId,
-        { status: newStatus },
-      )
+      const request = requests.find((item) => item.id === requestId)
+      if (
+        request?.type === 'mentorship'
+        && (newStatus === 'accepted' || newStatus === 'declined')
+      ) {
+        await updateMentorshipRequestStatus(requestId, newStatus)
+      } else {
+        await tablesDB.updateRow(
+          process.env.NEXT_PUBLIC_DATABASE_ID!,
+          'requests',
+          requestId,
+          { status: newStatus },
+        )
+      }
       setRequests(current => current.map(req => req.id === requestId ? { ...req, status: newStatus } : req))
       toast.success(`Request marked as ${newStatus}.`)
     } catch (error) {
@@ -216,22 +225,39 @@ export default function RequestsPage() {
                 <Card key={req.id} className="glass-card border-none">
                   <CardHeader className="pb-2 flex flex-row items-center justify-between">
                     <div>
-                      <CardTitle className="text-lg">
+                      <CardTitle className="text-lg text-gray-900 dark:text-gray-100">
                         {userRole === 'alumni' ? req.studentProfile?.full_name : req.alumniProfile?.full_name}
                       </CardTitle>
-                      <CardDescription className="text-white/60">
+                      <CardDescription className="text-gray-900 dark:text-gray-100">
                         {new Date(req.created_at).toLocaleDateString()}
                       </CardDescription>
                     </div>
                     {renderStatusBadge(req.status)}
                   </CardHeader>
                   <CardContent>
-                    <p className="text-white/80 text-sm bg-white/5 p-3 rounded-md">{req.message}</p>
+                    <p className="text-gray-900 dark:text-gray-100 text-sm bg-white/5 p-3 rounded-md">{req.message}</p>
                   </CardContent>
                   {userRole === 'alumni' && req.status === 'pending' && (
                     <CardFooter className="flex gap-2">
-                      <Button size="sm" disabled={updatingRequestId === req.id} onClick={() => updateRequestStatus(req.id, 'accepted')} className="bg-green-500/80 hover:bg-green-500">{updatingRequestId === req.id && <Loader2 className="animate-spin" />}Accept</Button>
-                      <Button size="sm" disabled={updatingRequestId === req.id} onClick={() => updateRequestStatus(req.id, 'declined')} variant="destructive">Decline</Button>
+                      <Button
+                        size="sm"
+                        aria-label="Accept mentorship request"
+                        disabled={updatingRequestId === req.id}
+                        onClick={() => updateRequestStatus(req.id, 'accepted')}
+                        className="bg-green-500/80 hover:bg-green-500"
+                      >
+                        {updatingRequestId === req.id && <Loader2 className="animate-spin" />}
+                        Accept
+                      </Button>
+                      <Button
+                        size="sm"
+                        aria-label="Decline mentorship request"
+                        disabled={updatingRequestId === req.id}
+                        onClick={() => updateRequestStatus(req.id, 'declined')}
+                        variant="destructive"
+                      >
+                        Decline
+                      </Button>
                     </CardFooter>
                   )}
                 </Card>
@@ -297,19 +323,19 @@ export default function RequestsPage() {
                   <Card key={req.id} className="glass-card border-none">
                     <CardHeader className="pb-2 flex flex-row items-center justify-between">
                       <div>
-                        <CardTitle className="text-lg">
+                        <CardTitle className="text-lg text-gray-900 dark:text-gray-100">
                           {userRole === 'alumni' ? req.studentProfile?.full_name : req.alumniProfile?.full_name}
                         </CardTitle>
-                        <CardDescription className="text-white/60">
+                        <CardDescription className="text-gray-900 dark:text-gray-100">
                           {new Date(req.created_at).toLocaleDateString()}
                         </CardDescription>
                       </div>
                       {renderStatusBadge(req.status)}
                     </CardHeader>
                     <CardContent className="space-y-3">
-                      <p className="text-white/80 text-sm bg-white/5 p-3 rounded-md">{req.message}</p>
+                      <p className="text-gray-900 dark:text-gray-100 text-sm bg-white/5 p-3 rounded-md">{req.message}</p>
                       {req.document_url && (
-                        <a href={req.document_url} target="_blank" rel="noopener noreferrer" className="text-blue-400 text-sm hover:underline">
+                        <a href={req.document_url} target="_blank" rel="noopener noreferrer" className="text-blue-700 dark:text-blue-300 text-sm hover:underline">
                           View Resume PDF
                         </a>
                       )}
@@ -338,17 +364,17 @@ export default function RequestsPage() {
                 <Card key={req.id} className="glass-card border-none">
                   <CardHeader className="pb-2 flex flex-row items-center justify-between">
                     <div>
-                      <CardTitle className="text-lg">
+                      <CardTitle className="text-lg text-gray-900 dark:text-gray-100">
                         {userRole === 'alumni' ? req.studentProfile?.full_name : req.alumniProfile?.full_name}
                       </CardTitle>
-                      <CardDescription className="text-white/60">
+                      <CardDescription className="text-gray-900 dark:text-gray-100">
                         {req.alumniProfile?.company}
                       </CardDescription>
                     </div>
                   </CardHeader>
                   <CardContent>
                     <div className="mb-4">{renderStatusBadge(req.status)}</div>
-                    <p className="text-white/80 text-sm">{req.message}</p>
+                    <p className="text-gray-900 dark:text-gray-100 text-sm">{req.message}</p>
                   </CardContent>
                   {userRole === 'alumni' && (
                     <CardFooter className="flex flex-wrap gap-2">

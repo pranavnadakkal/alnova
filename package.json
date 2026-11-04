@@ -3,13 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --webpack",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
     "appwrite:setup": "node scripts/provision-appwrite-tables.mjs"
   },
   "dependencies": {
+    "@babel/runtime": "^7.29.10",
     "@base-ui/react": "^1.7.0",
     "@hookform/resolvers": "^5.9.1",
     "appwrite": "^29.2.0",
