@@ -1,9 +1,11 @@
 import { redirect } from 'next/navigation'
-import { createClient } from '@/lib/supabase/server'
+import { createAdminClient, createSessionClient } from '@/lib/appwrite/server'
+import { Query } from 'node-appwrite'
 import { verifyAlumni } from './actions'
 import { CheckCircle2, GraduationCap, ShieldCheck, Users } from 'lucide-react'
 
 type AlumniCandidate = {
+  document_id: string
   profile_id: string
   full_name: string
   company: string | null
@@ -11,43 +13,65 @@ type AlumniCandidate = {
 }
 
 export default async function AdminDashboardPage() {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) redirect('/login')
+  let sessionClient
+  try {
+    sessionClient = await createSessionClient()
+  } catch {
+    redirect('/login')
+  }
+  const user = await sessionClient.account.get()
+  const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!
 
-  const { data: admin } = await supabase
-    .from('users')
-    .select('role')
-    .eq('id', user.id)
-    .maybeSingle()
-  if ((admin as { role?: string } | null)?.role !== 'admin') redirect('/student-dashboard')
+  const adminProfiles = await sessionClient.tablesDB.listRows(
+    databaseId,
+    'profiles',
+    [Query.equal('userId', user.$id)],
+  )
+  if (adminProfiles.rows[0]?.role !== 'admin') redirect('/student-dashboard')
 
-  const [
-    { count: activeStudents },
-    { count: verifiedAlumni },
-    { count: successfulSessions },
-    { data: unverifiedAlumni, error: alumniError },
-  ] = await Promise.all([
-    supabase.from('users').select('id', { count: 'exact', head: true }).eq('role', 'student'),
-    supabase.from('alumni_profiles').select('id', { count: 'exact', head: true }).eq('is_verified', true),
-    supabase.from('mentorship_sessions').select('id', { count: 'exact', head: true }).eq('status', 'completed'),
-    supabase.from('alumni_profiles').select('profile_id, company, industry, profiles!inner(full_name)').eq('is_verified', false),
+  const adminClient = createAdminClient()
+  const [students, verifiedAlumni, successfulSessions, unverifiedAlumni] = await Promise.all([
+    adminClient.tablesDB.listRows(databaseId, 'profiles', [
+      Query.equal('role', 'student'),
+      Query.limit(1),
+    ]),
+    adminClient.tablesDB.listRows(databaseId, 'alumni_profiles', [
+      Query.equal('isVerified', true),
+      Query.limit(1),
+    ]),
+    adminClient.tablesDB.listRows(databaseId, 'mentorship_sessions', [
+      Query.equal('status', 'completed'),
+      Query.limit(1),
+    ]),
+    adminClient.tablesDB.listRows(databaseId, 'alumni_profiles', [
+      Query.equal('isVerified', false),
+      Query.limit(5000),
+    ]),
   ])
-  if (alumniError) throw alumniError
 
-  const candidates = (unverifiedAlumni || []).map((entry) => {
-    const row = entry as unknown as {
-      profile_id: string
-      company: string | null
-      industry: string | null
-      profiles: { full_name: string } | { full_name: string }[]
-    }
-    const profile = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles
+  const profileIds = unverifiedAlumni.rows
+    .map((alumni) => alumni.profileId)
+    .filter((profileId): profileId is string => Boolean(profileId))
+  const profileResult = profileIds.length
+    ? await adminClient.tablesDB.listRows(databaseId, 'profiles', [
+        Query.equal('userId', profileIds),
+        Query.limit(5000),
+      ])
+    : { rows: [] }
+  const profileMap = new Map(profileResult.rows.map((profile) => [
+    profile.userId || profile.$id,
+    profile,
+  ]))
+
+  const candidates = unverifiedAlumni.rows.map((alumni) => {
+    const profileId = alumni.profileId || alumni.$id
+    const profile = profileMap.get(profileId)
     return {
-      profile_id: row.profile_id,
-      full_name: profile?.full_name || 'Unnamed alumni',
-      company: row.company,
-      industry: row.industry,
+      document_id: alumni.$id,
+      profile_id: profileId,
+      full_name: profile?.fullName || alumni.fullName || 'Unnamed alumni',
+      company: alumni.company || null,
+      industry: alumni.industry || null,
     } satisfies AlumniCandidate
   })
 
@@ -60,9 +84,9 @@ export default async function AdminDashboardPage() {
       </header>
 
       <section className="grid gap-4 sm:grid-cols-3">
-        <Metric icon={Users} label="Active students" value={activeStudents || 0} />
-        <Metric icon={ShieldCheck} label="Verified alumni" value={verifiedAlumni || 0} />
-        <Metric icon={GraduationCap} label="Successful sessions" value={successfulSessions || 0} />
+        <Metric icon={Users} label="Active students" value={students.total} />
+        <Metric icon={ShieldCheck} label="Verified alumni" value={verifiedAlumni.total} />
+        <Metric icon={GraduationCap} label="Successful sessions" value={successfulSessions.total} />
       </section>
 
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
@@ -85,7 +109,7 @@ export default async function AdminDashboardPage() {
                     {[candidate.company, candidate.industry].filter(Boolean).join(' · ') || 'No professional details provided'}
                   </p>
                 </div>
-                <form action={verifyAlumni.bind(null, candidate.profile_id)}>
+                <form action={verifyAlumni.bind(null, candidate.document_id, candidate.profile_id)}>
                   <button type="submit" className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-indigo-700">
                     Verify alumni
                   </button>

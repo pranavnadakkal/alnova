@@ -4,15 +4,15 @@ Generated: 2026-11-01
 
 ## 1. Product overview
 
-ALNOVA is a Next.js and Supabase alumni mentorship platform. It connects students with alumni for mentorship, resume reviews, referrals, sessions, and direct messaging. Teachers have a separate operational role for publishing announcements and viewing alumni performance and student-association metrics.
+ALNOVA is a Next.js and Appwrite alumni mentorship platform. It connects students with alumni for mentorship, resume reviews, referrals, sessions, and direct messaging. Teachers have a separate operational role for publishing announcements and viewing alumni performance and student-association metrics.
 
 ## 2. Technology stack
 
 - Next.js 16.3.1 App Router
 - React 19.2.8
 - TypeScript 5
-- Supabase Auth, Postgres, Row Level Security, Realtime, and Storage
-- Supabase SSR helpers for server/client authentication
+- Appwrite Auth, TablesDB, Realtime, and Storage
+- Appwrite SDK clients for browser and server authentication
 - Tailwind CSS 4
 - React Hook Form and Zod for forms and validation
 - Lucide React for icons
@@ -26,8 +26,8 @@ ALNOVA is a Next.js and Supabase alumni mentorship platform. It connects student
 - `src/components/dashboard/`: shared dashboards, navigation, and chat.
 - `src/components/student/`: student request modals.
 - `src/components/ui/`: reusable UI primitives.
-- `src/lib/`: Supabase clients, date helpers, and utility functions.
-- `src/lib/supabase/`: canonical browser, server, and proxy Supabase helpers.
+- `src/lib/`: Appwrite clients, date helpers, and utility functions.
+- `src/lib/appwrite/`: Appwrite browser and server clients.
 - `src/types/`: application and database-oriented TypeScript models.
 - `supabase/migrations/`: incremental database changes.
 - `supabase/reset_schema.sql`: destructive, auth-preserving reference schema reset.
@@ -185,7 +185,13 @@ The live database has existed in more than one schema shape. The application the
 
 This Compatibility behavior was added because SQL migration files are not automatically executed by the application. The current Phase 1 code now targets the standardized `profiles.user_id` schema.
 
-Phase 1 now standardizes application profile lookups on `profiles.user_id` and removes the duplicate Supabase helper directories. The canonical helpers are `src/lib/supabase/client.ts`, `src/lib/supabase/server.ts`, and `src/lib/supabase/proxy.ts`.
+The application now uses Appwrite for authentication, profile lookups, and database operations. Client and server helpers are in `src/lib/appwrite/`.
+
+### Appwrite TablesDB setup
+
+The application uses TablesDB rows rather than legacy collection documents. Configure `NEXT_PUBLIC_APPWRITE_ENDPOINT`, `NEXT_PUBLIC_APPWRITE_PROJECT_ID`, `NEXT_PUBLIC_DATABASE_ID`, and the existing table IDs (`NEXT_PUBLIC_PROFILES_TABLE_ID`, `NEXT_PUBLIC_REQUESTS_TABLE_ID`, `NEXT_PUBLIC_MESSAGES_TABLE_ID`, and `NEXT_PUBLIC_ANNOUNCEMENTS_TABLE_ID`). Keep `APPWRITE_API_KEY` server-only; it is used for account/profile registration and schema provisioning.
+
+Run `npm run appwrite:setup` after configuring those values. The idempotent script provisions the app's tables, columns, query indexes, and row security. It grants only table-level row creation to authenticated users; per-row permissions control reads and updates. New tables use their names as IDs.
 
 ## 9. Announcement behavior
 
@@ -246,14 +252,14 @@ The dashboard also displays total registered students, total associated students
 
 The authenticated dashboard layout:
 
-1. Gets the current Supabase user.
+1. Gets the current Appwrite user.
 2. Redirects unauthenticated users to `/login`.
 3. Looks up the profile using `user_id`.
 4. Requires the standardized `profiles.user_id` profile row.
 5. Redirects users without a profile to `/onboarding`.
 6. Chooses role-specific navigation.
 
-`proxy.ts` and `src/lib/supabase/proxy.ts` refresh Supabase auth cookies for the Next.js 16 setup.
+`proxy.ts` checks for the Appwrite session cookie for the Next.js 16 setup.
 
 ## 12. Validation performed
 
@@ -276,19 +282,15 @@ The current TypeScript and production build checks pass. The full ESLint check s
 
 ### High priority
 
-1. Apply migrations `10` through `19` to the actual Supabase project. Local SQL files do not change the live database automatically. Migration `18_fix_conversation_rls.sql` is required before existing conversation participant policies stop producing recursive RLS errors, and migration `19_request_status_compatibility.sql` is required for alumni request actions on deployments missing `requests.status`.
-2. Confirm the live database has `requests.student_id`, `requests.alumni_id`, and ideally `requests.status`.
-3. Confirm teacher request SELECT RLS is active.
-4. Confirm the `announcement-posters` Storage bucket and policies exist.
-5. Regenerate Supabase TypeScript types from the live schema.
+1. Run `npm run appwrite:setup` against every Appwrite environment and review row permissions.
+2. Confirm the `announcement-posters` and `avatars` Storage buckets exist and have the expected permissions.
 
 ### Medium priority
 
-1. Keep all Supabase helpers under the canonical `src/lib/supabase` directory.
-2. Consolidate duplicate type definitions in `src/types/index.ts` and `src/types/database.ts`.
-3. Remove or fully retire obsolete teacher messaging migrations and legacy participant-table code after confirming no production data depends on them.
-4. Replace raw `<img>` tags with Next.js image handling where appropriate.
-5. Replace the default Next.js README with ALNOVA-specific setup documentation.
+1. Consolidate duplicate type definitions in `src/types/index.ts` and `src/types/database.ts`.
+2. Remove or fully retire obsolete teacher messaging migrations and legacy participant-table code after confirming no production data depends on them.
+3. Replace raw `<img>` tags with Next.js image handling where appropriate.
+4. Replace the default Next.js README with ALNOVA-specific setup documentation.
 
 ### Product decisions still needed
 
@@ -331,4 +333,4 @@ npx tsc --noEmit
 
 ## 15. Important handoff instruction for another AI
 
-Before changing database-dependent code, inspect the live Supabase schema and compare it with `supabase/reset_schema.sql` and the latest migrations. Do not assume migrations have been applied. The active application contract is `profiles.user_id`; migrate any remaining legacy data before deployment. Do not reintroduce teacher messaging unless the product requirement changes; the current teacher experience is intentionally dashboard plus announcements.
+Before changing database-dependent code, inspect the Appwrite TablesDB tables and columns configured in the local or deployed Appwrite Console. The SQL files under `supabase/` are legacy migration references and do not configure the active Appwrite database. Do not reintroduce teacher messaging unless the product requirement changes; the current teacher experience is intentionally dashboard plus announcements.

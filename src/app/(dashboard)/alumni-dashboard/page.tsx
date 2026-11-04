@@ -1,29 +1,30 @@
 import { redirect } from 'next/navigation'
-import { createClient } from '@/lib/supabase/server'
+import { createSessionClient } from '@/lib/appwrite/server'
+import { Query } from 'node-appwrite'
 import AlumniDashboard from '@/components/dashboard/AlumniDashboard'
 
 export default async function AlumniDashboardPage() {
-  const supabase = await createClient()
-
-  const { data: { user } } = await supabase.auth.getUser()
-
-  if (!user) {
+  let sessionClient
+  try {
+    sessionClient = await createSessionClient()
+  } catch {
     redirect('/login')
   }
+  const user = await sessionClient.account.get()
+  const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!
 
-  // Prefer the deployed legacy key, then support the standardized schema.
-  let { data: profile } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('id', user.id)
-    .maybeSingle()
-
-  if (!profile) {
-    profile = (await supabase
-      .from('profiles')
-      .select('*')
-      .eq('user_id', user.id)
-      .maybeSingle()).data
+  const profiles = await sessionClient.tablesDB.listRows(
+    databaseId,
+    'profiles',
+    [Query.equal('userId', user.$id)],
+  )
+  const profileDocument = profiles.rows[0]
+  const profile = profileDocument && {
+    ...profileDocument,
+    id: profileDocument.userId || profileDocument.$id,
+    user_id: profileDocument.userId || profileDocument.$id,
+    full_name: profileDocument.fullName || profileDocument.full_name,
+    role: profileDocument.role,
   }
 
   if (!profile) {
@@ -37,23 +38,41 @@ export default async function AlumniDashboardPage() {
   }
 
   // Fetch connection requests for stats and recent activity
-  const { data: requests, error: requestsError } = await supabase
-    .from('requests')
-    .select('*')
-    .eq('alumni_id', user.id)
-    .order('created_at', { ascending: false })
-    .limit(5)
-
-  const studentIds = (requests || []).map((request) => request.student_id).filter(Boolean)
-  const { data: students } = studentIds.length
-    ? await supabase.from('profiles').select('*').in('id', studentIds)
-    : { data: [] }
-  const studentMap = new Map((students || []).map((student) => [student.user_id || student.id, student]))
-  const enrichedRequests = (requests || []).map((request) => ({
+  const requestResult = await sessionClient.tablesDB.listRows(
+    databaseId,
+    'requests',
+    [Query.equal('alumniId', user.$id), Query.orderDesc('$createdAt'), Query.limit(5)],
+  )
+  const requests = requestResult.rows.map((request) => ({
+    ...request,
+    id: request.$id,
+    student_id: request.studentId,
+    alumni_id: request.alumniId,
+    created_at: request.$createdAt,
+    status: request.status,
+  }))
+  const studentIds = requests.map((request) => request.student_id).filter(Boolean)
+  const studentResult = studentIds.length
+    ? await sessionClient.tablesDB.listRows(
+        databaseId,
+        'profiles',
+        [Query.equal('userId', studentIds)],
+      )
+    : { rows: [] }
+  const studentMap = new Map(studentResult.rows.map((student) => [
+    student.userId || student.$id,
+    {
+      ...student,
+      id: student.userId || student.$id,
+      user_id: student.userId || student.$id,
+      full_name: student.fullName || student.full_name,
+    },
+  ]))
+  const enrichedRequests = requests.map((request) => ({
     ...request,
     student: studentMap.get(request.student_id) || null,
     status: request.status || 'pending',
   }))
 
-  return <AlumniDashboard profile={profile} requests={requestsError ? [] : enrichedRequests} />
+  return <AlumniDashboard profile={profile} requests={enrichedRequests} />
 }

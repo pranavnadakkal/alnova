@@ -1,48 +1,46 @@
 'use server'
 
 import { revalidatePath } from 'next/cache'
-import { createClient } from '@/lib/supabase/server'
+import { createAdminClient, createSessionClient } from '@/lib/appwrite/server'
+import { ID, Query } from 'node-appwrite'
 
-type AdminMutationClient = {
-  from: (table: string) => {
-    update: (values: Record<string, unknown>) => {
-      eq: (column: string, value: string) => Promise<{ error: Error | null }>
-    }
-    insert: (values: Record<string, unknown>) => Promise<{ error: Error | null }>
+export async function verifyAlumni(alumniProfileDocumentId: string, profileId: string) {
+  let sessionClient
+  try {
+    sessionClient = await createSessionClient()
+  } catch {
+    throw new Error('You must be signed in.')
   }
-}
-
-export async function verifyAlumni(profileId: string) {
-  const supabase = await createClient()
-  const mutationClient = supabase as unknown as AdminMutationClient
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('You must be signed in.')
-
-  const { data: admin } = await supabase
-    .from('users')
-    .select('role')
-    .eq('id', user.id)
-    .maybeSingle()
-  if ((admin as { role?: string } | null)?.role !== 'admin') {
+  const user = await sessionClient.account.get()
+  const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!
+  const adminProfiles = await sessionClient.tablesDB.listRows(
+    databaseId,
+    'profiles',
+    [Query.equal('userId', user.$id)],
+  )
+  if (adminProfiles.rows[0]?.role !== 'admin') {
     throw new Error('Only administrators can verify alumni.')
   }
 
-  const { error: verificationError } = await mutationClient
-    .from('alumni_profiles')
-    .update({ is_verified: true })
-    .eq('profile_id', profileId)
-  if (verificationError) throw verificationError
-
-  const { error: notificationError } = await mutationClient
-    .from('notifications')
-    .insert({
-      user_id: profileId,
+  const adminClient = createAdminClient()
+  await adminClient.tablesDB.updateRow(
+    databaseId,
+    'alumni_profiles',
+    alumniProfileDocumentId,
+    { isVerified: true },
+  )
+  await adminClient.tablesDB.createRow(
+    databaseId,
+    'notifications',
+    ID.unique(),
+    {
+      userId: profileId,
       type: 'alumni_verified',
       content: 'Your alumni profile has been verified.',
       link: '/profile',
-      is_read: false,
-    })
-  if (notificationError) throw notificationError
+      isRead: false,
+    },
+  )
 
   revalidatePath('/dashboard/admin')
   revalidatePath('/directory')

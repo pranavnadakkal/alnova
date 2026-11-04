@@ -1,8 +1,9 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { createClient } from '@/lib/supabase/client'
+import { account, tablesDB } from '@/lib/appwrite/client'
+import { ID, Query } from 'appwrite'
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
@@ -19,16 +20,15 @@ import {
 import { toast } from 'sonner'
 import Link from 'next/link'
 
-type AlumniProfile = Profile & { users?: { role: string } }
+type AlumniProfile = Profile & { tech_skills?: string[]; users?: { role: string } }
 
 type ConnectedStudent = {
-  profile: Profile
+  profile: Profile & { tech_skills?: string[] }
   request: ConnectionRequest
 }
 
 export default function DirectoryPage() {
   const router = useRouter()
-  const supabase = useMemo(() => createClient(), [])
   const [userRole, setUserRole] = useState<'student' | 'alumni' | null>(null)
   const [userId, setUserId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -61,117 +61,143 @@ export default function DirectoryPage() {
       setIsLoading(true)
       setLoadError(null)
       try {
-        const { data: { user }, error: authError } = await supabase.auth.getUser()
-        if (authError) throw authError
-        if (!user) {
+        let user
+        try {
+          user = await account.get()
+        } catch {
           router.push('/login')
           return
         }
-        setUserId(user.id)
+        const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!
+        setUserId(user.$id)
 
-        const { data: userData, error: userError } = await supabase
-          .from('users')
-          .select('role')
-          .eq('id', user.id)
-          .single()
-
-        let currentRole = userData?.role as 'student' | 'alumni' | undefined
-        let { data: profileRole } = await supabase
-            .from('profiles')
-            .select('role')
-            .eq('id', user.id)
-            .maybeSingle()
-        if (!profileRole) {
-            profileRole = (await supabase.from('profiles').select('role').eq('user_id', user.id).maybeSingle()).data
+        const ownProfiles = await tablesDB.listRows(databaseId, 'profiles', [
+          Query.equal('userId', user.$id),
+        ])
+        const currentRole = ownProfiles.rows[0]?.role as 'student' | 'alumni' | undefined
+        if (currentRole !== 'student' && currentRole !== 'alumni') {
+          throw new Error('Your account role is not set.')
         }
-        if (profileRole?.role === 'alumni') currentRole = 'alumni'
-        if (profileRole?.role === 'student') currentRole = 'student'
-        if (!currentRole) throw userError || new Error('Your account role is not set.')
         setUserRole(currentRole)
 
         if (currentRole === 'student') {
           // Fetch alumni directory for students
-          const { data: users, error: usersError } = await supabase
-            .from('users')
-            .select('id, role')
-            .eq('role', 'alumni')
-
-          if (usersError) throw usersError
-          if (users && users.length > 0) {
-            const alumniIds = users.map((u) => u.id)
-            let { data: profiles, error: profilesError } = await supabase
-              .from('profiles')
-              .select('*')
-              .in('id', alumniIds)
-            if (!profiles?.length && !profilesError) {
-              const fallback = await supabase.from('profiles').select('*').in('user_id', alumniIds)
-              profiles = fallback.data
-              profilesError = fallback.error
-            }
-
-            if (profilesError) throw profilesError
-            if (profiles) setAlumni(profiles)
-          }
+          const alumniProfiles = await tablesDB.listRows(databaseId, 'profiles', [
+            Query.equal('role', 'alumni'),
+            Query.limit(5000),
+          ])
+          const alumniIds = alumniProfiles.rows.map((profile) => profile.userId || profile.$id)
+          const [alumniDetails, profileSkills, skills] = await Promise.all([
+            alumniIds.length
+              ? tablesDB.listRows(databaseId, 'alumni_profiles', [
+                  Query.equal('profileId', alumniIds),
+                  Query.limit(5000),
+                ])
+              : Promise.resolve({ rows: [] }),
+            alumniIds.length
+              ? tablesDB.listRows(databaseId, 'profile_skills', [
+                  Query.equal('profileId', alumniIds),
+                  Query.limit(5000),
+                ])
+              : Promise.resolve({ rows: [] }),
+            tablesDB.listRows(databaseId, 'skills', [Query.limit(5000)]),
+          ])
+          const detailMap = new Map(alumniDetails.rows.map((detail) => [detail.profileId, detail]))
+          const skillNames = new Map(skills.rows.map((skill) => [skill.$id, skill.name]))
+          const skillsByProfile = new Map<string, string[]>()
+          profileSkills.rows.forEach((link) => {
+            const names = skillsByProfile.get(link.profileId) || []
+            const name = skillNames.get(link.skillId)
+            if (name) names.push(name)
+            skillsByProfile.set(link.profileId, names)
+          })
+          setAlumni(alumniProfiles.rows.map((profile) => ({
+            id: profile.$id,
+            user_id: profile.userId || profile.$id,
+            email: profile.email || '',
+            full_name: profile.fullName || 'Alumni member',
+            avatar_url: profile.avatarUrl || null,
+            role: 'alumni',
+            headline: profile.headline || detailMap.get(profile.userId || profile.$id)?.jobTitle || null,
+            bio: profile.bio || null,
+            company: detailMap.get(profile.userId || profile.$id)?.company || profile.company || null,
+            industry: detailMap.get(profile.userId || profile.$id)?.industry || profile.industry || null,
+            linkedin_url: profile.linkedInUrl || null,
+            years_of_experience: detailMap.get(profile.userId || profile.$id)?.yearsOfExperience || null,
+            open_to_referrals: detailMap.get(profile.userId || profile.$id)?.openToReferrals ?? true,
+            tech_skills: skillsByProfile.get(profile.userId || profile.$id) || [],
+            created_at: profile.$createdAt,
+          } as Profile & { users?: { role: string } })))
 
           // Fetch student's existing connection requests
-          const { data: existingRequests, error: existingRequestsError } = await supabase
-            .from('requests')
-            .select('*')
-            .eq('student_id', user.id)
-
-          if (existingRequestsError) throw existingRequestsError
-          if (existingRequests) setMyRequests(existingRequests)
+          const existingRequests = await tablesDB.listRows(databaseId, 'requests', [
+            Query.equal('studentId', user.$id),
+            Query.limit(5000),
+          ])
+          setMyRequests(existingRequests.rows.map((request) => ({
+            id: request.$id,
+            student_id: request.studentId,
+            alumni_id: request.alumniId,
+            type: request.type,
+            status: request.status || 'pending',
+            message: request.message || '',
+            document_url: request.documentUrl || null,
+            created_at: request.$createdAt,
+          } as ConnectionRequest)))
         } else if (currentRole === 'alumni') {
           // Fetch connected students for alumni
-          let { data: requests, error: requestsError } = await supabase
-            .from('requests')
-            .select('*')
-            .eq('alumni_id', user.id)
-            .in('status', ['accepted', 'completed', 'reviewing', 'referred', 'pending'])
+          const requestResult = await tablesDB.listRows(databaseId, 'requests', [
+            Query.equal('alumniId', user.$id),
+            Query.limit(5000),
+          ])
+          const allowedStatuses = new Set(['accepted', 'completed', 'reviewing', 'referred', 'pending'])
+          const requests = requestResult.rows
+            .filter((request) => allowedStatuses.has(request.status || 'pending'))
+            .map((request) => ({
+              id: request.$id,
+              student_id: request.studentId,
+              alumni_id: request.alumniId,
+              type: request.type,
+              status: request.status || 'pending',
+              message: request.message || '',
+              document_url: request.documentUrl || null,
+              created_at: request.$createdAt,
+            } as ConnectionRequest))
 
-          if (requestsError?.message.includes('requests.status')) {
-            const fallback = await supabase
-              .from('requests')
-              .select('*')
-              .eq('alumni_id', user.id)
-            requests = fallback.data
-            requestsError = fallback.error
-          }
-
-          if (requestsError) throw requestsError
-
-          if (requests && requests.length > 0) {
-            const studentIds = [...new Set(requests.map((r: ConnectionRequest) => r.student_id))]
-            let { data: profiles, error: profilesError } = await supabase
-              .from('profiles')
-              .select('*')
-              .in('id', studentIds)
-            if (!profiles?.length && !profilesError) {
-              const fallback = await supabase.from('profiles').select('*').in('user_id', studentIds)
-              profiles = fallback.data
-              profilesError = fallback.error
-            }
-
-            if (profilesError) throw profilesError
-
-            if (profiles) {
-              // Map each unique student to their most recent request
-              const studentMap = new Map<string, ConnectedStudent>()
-              for (const profile of profiles) {
-                const studentRequests = requests
-                  .filter((r: ConnectionRequest) => r.student_id === profile.user_id)
-                  .sort((a: ConnectionRequest, b: ConnectionRequest) =>
-                    new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-                  )
-                if (studentRequests.length > 0) {
-                  studentMap.set(profile.user_id, {
-                    profile,
-                    request: studentRequests[0]
-                  })
-                }
+          if (requests.length > 0) {
+            const studentIds = [...new Set(requests.map((request) => request.student_id))]
+            const profiles = await tablesDB.listRows(databaseId, 'profiles', [
+              Query.equal('userId', studentIds),
+              Query.limit(5000),
+            ])
+            const studentMap = new Map<string, ConnectedStudent>()
+            for (const document of profiles.rows) {
+              const profileId = document.userId || document.$id
+              const profile = {
+                id: document.$id,
+                user_id: profileId,
+                email: document.email || '',
+                full_name: document.fullName || 'Student',
+                avatar_url: document.avatarUrl || null,
+                role: 'student',
+                headline: document.headline || null,
+                bio: document.bio || null,
+                company: document.company || null,
+                industry: document.industry || null,
+                linkedin_url: document.linkedInUrl || null,
+                graduation_year: document.graduationYear || null,
+                target_roles: document.targetRoles || null,
+                created_at: document.$createdAt,
+                tech_skills: document.techSkills || [],
+              } as Profile & { tech_skills?: string[] }
+              const studentRequests = requests
+                .filter((request) => request.student_id === profileId)
+                .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+              if (studentRequests[0]) {
+                studentMap.set(profileId, { profile, request: studentRequests[0] })
               }
-              setConnectedStudents(Array.from(studentMap.values()))
             }
+            setConnectedStudents(Array.from(studentMap.values()))
           }
         }
       } catch (error) {
@@ -188,7 +214,7 @@ export default function DirectoryPage() {
     }
 
     fetchData()
-  }, [supabase, router])
+  }, [router])
 
   // Student: send mentorship/referral request
   const handleRequestMentorship = async () => {
@@ -211,14 +237,16 @@ export default function DirectoryPage() {
     setIsSubmitting(true)
 
     // Check with backend to prevent double-submit or stale state
-    const { data: existingDbReq } = await supabase
-      .from('requests')
-      .select('id, status, type')
-      .eq('student_id', userId)
-      .eq('alumni_id', selectedAlumniId)
-      .eq('type', requestType)
-      .in('status', ['pending', 'accepted', 'reviewing', 'referred', 'completed'])
-      .maybeSingle()
+    const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!
+    const existingRequests = await tablesDB.listRows(databaseId, 'requests', [
+      Query.equal('studentId', userId),
+      Query.equal('alumniId', selectedAlumniId),
+      Query.equal('type', requestType),
+      Query.limit(5000),
+    ])
+    const existingDbReq = existingRequests.rows.find((request) =>
+      ['pending', 'accepted', 'reviewing', 'referred', 'completed'].includes(request.status),
+    )
 
     if (existingDbReq) {
       if (existingDbReq.status === 'pending') {
@@ -230,36 +258,52 @@ export default function DirectoryPage() {
       }
 
       // Sync local requests
-      const { data: refreshed } = await supabase
-        .from('requests')
-        .select('*')
-        .eq('student_id', userId)
-      if (refreshed) setMyRequests(refreshed)
+      const refreshed = await tablesDB.listRows(databaseId, 'requests', [
+        Query.equal('studentId', userId),
+        Query.limit(5000),
+      ])
+      setMyRequests(refreshed.rows.map((request) => ({
+        id: request.$id,
+        student_id: request.studentId,
+        alumni_id: request.alumniId,
+        type: request.type,
+        status: request.status || 'pending',
+        message: request.message || '',
+        document_url: request.documentUrl || null,
+        created_at: request.$createdAt,
+      } as ConnectionRequest)))
 
       setIsSubmitting(false)
       setDialogOpen(false)
       return
     }
 
-    const { data: inserted, error } = await supabase
-      .from('requests')
-      .insert({
-        student_id: userId,
-        alumni_id: selectedAlumniId,
+    try {
+      const inserted = await tablesDB.createRow(databaseId, 'requests', ID.unique(), {
+        studentId: userId,
+        alumniId: selectedAlumniId,
         type: requestType,
         message: requestMessage.trim(),
-        status: 'pending'
+        status: 'pending',
       })
-      .select()
-      .single()
-
-    if (!error && inserted) {
-      setMyRequests((prev) => [inserted, ...prev])
+      const insertedRequest = {
+        id: inserted.$id,
+        student_id: inserted.studentId,
+        alumni_id: inserted.alumniId,
+        type: inserted.type,
+        status: inserted.status || 'pending',
+        message: inserted.message || '',
+        document_url: inserted.documentUrl || null,
+        created_at: inserted.$createdAt,
+      } as ConnectionRequest
+      setMyRequests((prev) => [insertedRequest, ...prev])
       setDialogOpen(false)
       setRequestMessage('')
       toast.success(`${requestType === 'mentorship' ? 'Mentorship' : 'Referral'} request sent successfully!`)
-    } else {
-      toast.error('Failed to send request', { description: error?.message || 'Please try again.' })
+    } catch (error) {
+      toast.error('Failed to send request', {
+        description: error instanceof Error ? error.message : 'Please try again.',
+      })
     }
     setIsSubmitting(false)
   }

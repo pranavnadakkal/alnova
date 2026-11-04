@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { createClient } from '@/lib/supabase/client'
+import { registerUser } from './actions'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import * as z from 'zod'
@@ -32,7 +32,6 @@ type RegisterFormData = z.infer<typeof registerSchema>
 
 export default function RegisterPage() {
   const router = useRouter()
-  const supabase = createClient()
   const [isLoading, setIsLoading] = useState(false)
   const [success, setSuccess] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
@@ -51,25 +50,19 @@ export default function RegisterPage() {
   const onSubmit = async (data: RegisterFormData) => {
     setIsLoading(true)
     setServerError(null)
-    
-    const { error } = await supabase.auth.signUp({
-      email: data.email,
-      password: data.password,
-      options: {
-        emailRedirectTo: `${window.location.origin}/auth/callback`,
-      }
-    })
 
-    if (error) {
-      setServerError(error.message)
-      toast.error(error.message)
+    try {
+      await registerUser({ email: data.email, password: data.password })
+
+      toast.success('Registration successful! Please log in.')
+      setSuccess(true)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to register. Please try again.'
+      setServerError(message)
+      toast.error(message)
+    } finally {
       setIsLoading(false)
-      return
     }
-
-    toast.success('Registration successful! Please check your email.')
-    setSuccess(true)
-    setIsLoading(false)
   }
 
   if (success) {

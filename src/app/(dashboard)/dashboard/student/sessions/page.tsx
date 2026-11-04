@@ -1,9 +1,10 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { createClient } from '@/lib/supabase/client'
+import { account, tablesDB } from '@/lib/appwrite/client'
+import { Query } from 'appwrite'
 import {
   GraduationCap,
   Clock,
@@ -25,7 +26,6 @@ import { toast } from 'sonner'
 
 export default function StudentSessionsTrackerPage() {
   const router = useRouter()
-  const supabase = useMemo(() => createClient(), [])
   const [userId, setUserId] = useState<string | null>(null)
   const [sessions, setSessions] = useState<any[]>([])
   const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'accepted' | 'completed' | 'declined'>('all')
@@ -36,70 +36,80 @@ export default function StudentSessionsTrackerPage() {
     const fetchSessions = async () => {
       setIsLoading(true)
       try {
-        const { data: { user } } = await supabase.auth.getUser()
-        if (!user) {
+        let user
+        try {
+          user = await account.get()
+        } catch {
           router.push('/login')
           return
         }
-        setUserId(user.id)
+        setUserId(user.$id)
+        const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!
 
         // 1. Fetch from mentorship_sessions
         let sessionList: any[] = []
-        const { data: rows } = await supabase
-          .from('mentorship_sessions')
-          .select('*')
-          .eq('student_id', user.id)
-          .order('created_at', { ascending: false })
+        const rows = await tablesDB.listRows(databaseId, 'mentorship_sessions', [
+          Query.equal('studentId', user.$id),
+          Query.orderDesc('$createdAt'),
+          Query.limit(5000),
+        ])
 
-        if (rows && rows.length > 0) {
-          sessionList = rows
+        if (rows.rows.length > 0) {
+          sessionList = rows.rows.map((session) => ({
+            ...session,
+            id: session.$id,
+            student_id: session.studentId,
+            alumni_id: session.alumniId,
+            created_at: session.$createdAt,
+          }))
         } else {
           // Fallback to requests table
-          const { data: legacy } = await supabase
-            .from('requests')
-            .select('*')
-            .eq('student_id', user.id)
-            .eq('type', 'mentorship')
-            .order('created_at', { ascending: false })
-
-          if (legacy) {
-            sessionList = legacy.map((r) => ({
-              id: r.id,
-              student_id: r.student_id,
-              alumni_id: r.alumni_id,
+          const legacy = await tablesDB.listRows(databaseId, 'requests', [
+            Query.equal('studentId', user.$id),
+            Query.equal('type', 'mentorship'),
+            Query.orderDesc('$createdAt'),
+            Query.limit(5000),
+          ])
+          sessionList = legacy.rows.map((request) => ({
+              id: request.$id,
+              student_id: request.studentId,
+              alumni_id: request.alumniId,
               topic: 'Mentorship Session',
-              pitch: r.message,
-              status: r.status,
-              created_at: r.created_at,
+              pitch: request.message,
+              status: request.status,
+              created_at: request.$createdAt,
             }))
-          }
         }
 
         // Attach alumni profiles
         const alumniIds = Array.from(new Set(sessionList.map((s) => s.alumni_id))).filter(Boolean)
         if (alumniIds.length > 0) {
-          let { data: alumniProfiles } = await supabase
-            .from('profiles')
-            .select('id, full_name, role, avatar_url, headline')
-            .in('id', alumniIds)
+          const [alumniProfiles, alumniExt] = await Promise.all([
+            tablesDB.listRows(databaseId, 'profiles', [
+              Query.equal('userId', alumniIds),
+              Query.limit(5000),
+            ]),
+            tablesDB.listRows(databaseId, 'alumni_profiles', [
+              Query.equal('profileId', alumniIds),
+              Query.limit(5000),
+            ]),
+          ])
 
-          const { data: alumniExt } = await supabase
-            .from('alumni_profiles')
-            .select('profile_id, company, job_title, industry')
-            .in('profile_id', alumniIds)
-
-          const extMap = new Map((alumniExt || []).map((e: any) => [e.profile_id, e]))
+          const extMap = new Map(alumniExt.rows.map((extension) => [extension.profileId, extension]))
           const map = new Map(
-            (alumniProfiles || []).map((p: any) => {
-              const profileId = p.user_id || p.id
+            alumniProfiles.rows.map((profile) => {
+              const profileId = profile.userId || profile.$id
               const ext = extMap.get(profileId)
               return [
                 profileId,
                 {
-                  ...p,
+                  ...profile,
+                  id: profileId,
                   user_id: profileId,
+                  full_name: profile.fullName || profile.full_name,
+                  avatar_url: profile.avatarUrl || profile.avatar_url,
                   company: ext?.company || null,
-                  role: ext?.job_title || p.headline || p.role,
+                  role: ext?.jobTitle || profile.headline || profile.role,
                   industry: ext?.industry || null,
                 },
               ]
@@ -118,7 +128,7 @@ export default function StudentSessionsTrackerPage() {
     }
 
     fetchSessions()
-  }, [supabase, router])
+  }, [router])
 
   const filteredSessions = sessions.filter((s) => {
     const matchStatus = filterStatus === 'all' || s.status === filterStatus

@@ -1,6 +1,7 @@
 import { Suspense } from 'react'
 import { redirect } from 'next/navigation'
-import { createClient } from '@/lib/supabase/server'
+import { createSessionClient } from '@/lib/appwrite/server'
+import { Query } from 'node-appwrite'
 import ChatInterface from '@/components/dashboard/ChatInterface'
 
 export const metadata = {
@@ -9,25 +10,20 @@ export const metadata = {
 }
 
 export default async function MessagesPage() {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-
-  if (!user) {
+  let sessionClient
+  try {
+    sessionClient = await createSessionClient()
+  } catch {
     redirect('/login')
   }
+  const user = await sessionClient.account.get()
 
-  let { data: profile } = await supabase
-    .from('profiles')
-    .select('role')
-    .eq('id', user.id)
-    .maybeSingle()
-  if (!profile) {
-    profile = (await supabase
-      .from('profiles')
-      .select('role')
-      .eq('user_id', user.id)
-      .maybeSingle()).data
-  }
+  const profiles = await sessionClient.tablesDB.listRows(
+    process.env.NEXT_PUBLIC_DATABASE_ID!,
+    'profiles',
+    [Query.equal('userId', user.$id)],
+  )
+  const profile = profiles.rows[0]
 
   if (!profile) {
     redirect('/onboarding')
@@ -53,7 +49,7 @@ export default async function MessagesPage() {
         </p>
       </div>
       <Suspense fallback={<div className="p-8 text-center text-slate-400">Loading messages...</div>}>
-        <ChatInterface userId={user.id} userRole={userRole} />
+        <ChatInterface userId={user.$id} userRole={userRole} />
       </Suspense>
     </div>
   )

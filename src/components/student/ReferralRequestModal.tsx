@@ -1,7 +1,8 @@
 'use client'
 
 import { useState } from 'react'
-import { createClient } from '@/lib/supabase/client'
+import { tablesDB } from '@/lib/appwrite/client'
+import { ID } from 'appwrite'
 import {
   Dialog,
   DialogContent,
@@ -38,7 +39,6 @@ export default function ReferralRequestModal({
   studentId,
   onSuccess,
 }: ReferralRequestModalProps) {
-  const supabase = createClient()
   const [jobTitle, setJobTitle] = useState('')
   const [jobUrl, setJobUrl] = useState('')
   const [resumeUrl, setResumeUrl] = useState('')
@@ -58,14 +58,19 @@ export default function ReferralRequestModal({
       const company = alumni.company || 'Company'
 
       // Also record in requests table with full referral details
-      const { error: requestError } = await supabase.from('requests').insert({
-        student_id: studentId,
-        alumni_id: alumni.id,
-        type: 'referral',
-        message: `Referral Request for ${jobTitle.trim()} at ${company}${jobUrl.trim() ? ` (${jobUrl.trim()})` : ''}: ${message.trim()}`,
-        document_url: resumeUrl.trim() || null,
-      })
-      if (requestError) throw requestError
+      await tablesDB.createRow(
+        process.env.NEXT_PUBLIC_DATABASE_ID!,
+        'requests',
+        ID.unique(),
+        {
+          studentId,
+          alumniId: alumni.id,
+          type: 'referral',
+          message: `Referral Request for ${jobTitle.trim()} at ${company}${jobUrl.trim() ? ` (${jobUrl.trim()})` : ''}: ${message.trim()}`,
+          documentUrl: resumeUrl.trim() || null,
+          status: 'pending',
+        },
+      )
 
       toast.success('Referral request submitted successfully!')
       setJobTitle('')

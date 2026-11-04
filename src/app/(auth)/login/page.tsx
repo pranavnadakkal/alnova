@@ -1,9 +1,11 @@
 'use client'
 
-import { useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { createClient } from '@/lib/supabase/client'
+import { AppwriteException } from 'appwrite'
+import { account, tablesDB } from '@/lib/appwrite/client'
+import { persistAppwriteSession, syncRoleLabel } from '@/app/(auth)/actions'
+import { Query } from 'appwrite'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import * as z from 'zod'
@@ -24,9 +26,40 @@ const loginSchema = z.object({
 
 type LoginFormData = z.infer<typeof loginSchema>
 
+async function finishLogin() {
+  const localSession = JSON.parse(localStorage.getItem('cookieFallback') || '{}')[
+    `a_session_${process.env.NEXT_PUBLIC_APPWRITE_PROJECT_ID}`
+  ]
+  if (typeof localSession !== 'string') {
+    throw new Error('Unable to establish a secure app session. Please try again.')
+  }
+  await persistAppwriteSession(localSession)
+
+  const user = await account.get()
+  const profiles = await tablesDB.listRows(
+    process.env.NEXT_PUBLIC_DATABASE_ID!,
+    'profiles',
+    [Query.equal('userId', user.$id)],
+  )
+  const userProfile = profiles.rows[0]
+  const role = userProfile?.role
+  const isAssignedRole = role === 'student' || role === 'alumni' || role === 'teacher'
+  if (isAssignedRole) await syncRoleLabel()
+
+  const destination = !userProfile || role === 'pending'
+    ? '/onboarding'
+    : role === 'alumni'
+      ? '/alumni-dashboard'
+      : role === 'teacher'
+        ? '/announcements'
+        : role === 'student'
+          ? '/student-dashboard'
+          : '/onboarding'
+
+  window.location.assign(destination)
+}
+
 export default function LoginPage() {
-  const router = useRouter()
-  const supabase = createClient()
   const [isLoading, setIsLoading] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const [serverError, setServerError] = useState<string | null>(null)
@@ -40,45 +73,58 @@ export default function LoginPage() {
     mode: 'onTouched',
   })
 
+  useEffect(() => {
+    let cancelled = false
+    const resumeSession = async () => {
+      try {
+        await account.get()
+        if (cancelled) return
+        await finishLogin()
+      } catch (error) {
+        if (error instanceof AppwriteException && error.code === 401) return
+        if (!cancelled) {
+          setServerError(error instanceof Error ? error.message : 'Unable to resume your session.')
+        }
+      }
+    }
+
+    void resumeSession()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const onSubmit = async (data: LoginFormData) => {
     setIsLoading(true)
     setServerError(null)
 
-    const { error } = await supabase.auth.signInWithPassword({
-      email: data.email,
-      password: data.password,
-    })
-
-    if (error) {
-      setServerError(error.message)
-      toast.error(error.message)
-      setIsLoading(false)
-      return
-    }
-
-    toast.success('Successfully logged in!')
-    const { data: { user } } = await supabase.auth.getUser()
-    if (user) {
-      const userIdProfile = await supabase
-        .from('profiles')
-        .select('user_id, role')
-        .eq('user_id', user.id)
-        .maybeSingle()
-      const profile = userIdProfile.data
-
-      if (!profile) {
-        router.push('/onboarding')
-      } else {
-        router.push(
-          profile.role === 'alumni'
-            ? '/alumni-dashboard'
-            : profile.role === 'teacher'
-              ? '/announcements'
-              : '/student-dashboard'
-        )
+    try {
+      try {
+        await account.get()
+        await account.deleteSession('current')
+      } catch (error) {
+        if (!(error instanceof AppwriteException) || error.code !== 401) {
+          throw error
+        }
       }
-    } else {
-      router.push('/student-dashboard')
+
+      const currentUser = await account.get().catch((error: unknown) => {
+        if (error instanceof AppwriteException && error.code === 401) return null
+        throw error
+      })
+      if (currentUser?.email !== data.email) {
+        if (currentUser) await account.deleteSession('current')
+        await account.createEmailPasswordSession(data.email, data.password)
+      }
+
+      toast.success('Successfully logged in!')
+      await finishLogin()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to log in. Please try again.'
+      setServerError(message)
+      toast.error(message)
+    } finally {
+      setIsLoading(false)
     }
   }
 

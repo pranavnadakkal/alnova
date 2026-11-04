@@ -1,7 +1,8 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
-import { createClient } from '@/lib/supabase/client'
+import { useState, useEffect } from 'react'
+import { tablesDB } from '@/lib/appwrite/client'
+import { Query } from 'appwrite'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
@@ -104,7 +105,6 @@ function formatEventDate(dateStr: string): string {
 // Main Component
 // ---------------------------------------------------------------------------
 export default function AnnouncementsFeed() {
-  const supabase = useMemo(() => createClient(), [])
   const [announcements, setAnnouncements] = useState<AnnouncementRow[]>([])
   const [isLoading, setIsLoading] = useState(true)
 
@@ -112,29 +112,39 @@ export default function AnnouncementsFeed() {
     async function fetchAnnouncements() {
       setIsLoading(true)
       try {
-        const { data, error } = await supabase
-          .from('announcements')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(10)
-
-        if (error) {
-          console.error('Error fetching announcements:', error)
-        } else {
-          const authorIds = Array.from(new Set((data || []).map((announcement) => announcement.author_id)))
-          const { data: profiles } = authorIds.length
-            ? await supabase.from('profiles').select('id, full_name').in('id', authorIds)
-            : { data: [] }
-          const profileMap = new Map(
-            (profiles || []).map((profile) => [profile.id, { full_name: profile.full_name }])
-          )
-          setAnnouncements(
-            ((data || []) as unknown as AnnouncementRow[]).map((announcement) => ({
-              ...announcement,
-              author: profileMap.get(announcement.author_id) || null,
-            }))
-          )
-        }
+        const { rows } = await tablesDB.listRows(
+          process.env.NEXT_PUBLIC_DATABASE_ID!,
+          'announcements',
+          [Query.orderDesc('$createdAt'), Query.limit(10)],
+        )
+        const authorIds = Array.from(new Set(rows.map((announcement) => announcement.authorId)))
+        const profiles = authorIds.length
+          ? await tablesDB.listRows(
+              process.env.NEXT_PUBLIC_DATABASE_ID!,
+              'profiles',
+              [Query.equal('userId', authorIds)],
+            )
+          : { rows: [] }
+        const profileMap = new Map(
+          profiles.rows.map((profile) => [
+            profile.userId,
+            { full_name: profile.fullName || profile.full_name || 'Unknown author' },
+          ])
+        )
+        setAnnouncements(
+          rows.map((announcement) => ({
+            id: announcement.$id,
+            author_id: announcement.authorId,
+            title: announcement.title,
+            content: announcement.content,
+            poster_url: announcement.posterUrl || null,
+            priority: announcement.priority || 'normal',
+            event_date: announcement.eventDate || null,
+            created_at: announcement.$createdAt,
+            author: profileMap.get(announcement.authorId) || null,
+            teacher_details: null,
+          }))
+        )
       } catch (err) {
         console.error('Failed to load announcements:', err)
       } finally {
@@ -143,7 +153,7 @@ export default function AnnouncementsFeed() {
     }
 
     fetchAnnouncements()
-  }, [supabase])
+  }, [])
 
   return (
     <Card className="border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm rounded-2xl overflow-hidden">

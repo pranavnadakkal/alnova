@@ -1,7 +1,8 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { createClient } from '@/lib/supabase/client'
+import { tablesDB, storage } from '@/lib/appwrite/client'
+import { ID, Query } from 'appwrite'
 import {
   Dialog,
   DialogContent,
@@ -12,7 +13,6 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Loader2, FileUp, FileText, CheckCircle2 } from 'lucide-react'
@@ -33,13 +33,6 @@ interface AlumniOption {
   role?: string | null
 }
 
-type AlumniProfileRow = {
-  profile_id: string
-  company?: string | null
-  job_title?: string | null
-  profile?: { full_name?: string; role?: string } | null
-}
-
 export default function ResumeReviewModal({
   isOpen,
   onClose,
@@ -47,7 +40,6 @@ export default function ResumeReviewModal({
   defaultAlumniId,
   onSuccess,
 }: ResumeReviewModalProps) {
-  const supabase = createClient()
   const [alumniList, setAlumniList] = useState<AlumniOption[]>([])
   const [selectedAlumniId, setSelectedAlumniId] = useState(defaultAlumniId || '')
   const [resumeFile, setResumeFile] = useState<File | null>(null)
@@ -56,53 +48,26 @@ export default function ResumeReviewModal({
   const [loadingAlumni, setLoadingAlumni] = useState(false)
 
   useEffect(() => {
-    if (defaultAlumniId) {
-      setSelectedAlumniId(defaultAlumniId)
-    }
-  }, [defaultAlumniId])
-
-  useEffect(() => {
     if (!isOpen) return
 
     const fetchAlumni = async () => {
       setLoadingAlumni(true)
       try {
-        const { data: alumniRows } = await supabase
-          .from('alumni_profiles')
-          .select('profile_id, company, job_title, profile:profiles(id, full_name, avatar_url, role)')
-
-        if (alumniRows && alumniRows.length > 0) {
-          const list = (alumniRows as unknown as AlumniProfileRow[]).map((a) => {
-            const p = a.profile || {}
-            return {
-              id: a.profile_id,
-              full_name: p.full_name || 'Alumni Member',
-              company: a.company || null,
-              role: a.job_title || p.role || 'Alumni',
-            }
-          })
+        const { rows } = await tablesDB.listRows(
+          process.env.NEXT_PUBLIC_DATABASE_ID!,
+          'profiles',
+          [Query.equal('role', 'alumni')],
+        )
+        if (rows.length > 0) {
+          const list = rows.map((profile) => ({
+            id: profile.userId,
+            full_name: profile.fullName || 'Alumni Member',
+            company: profile.company || null,
+            role: profile.role || 'Alumni',
+          }))
           setAlumniList(list)
           if (!selectedAlumniId && list.length > 0) {
             setSelectedAlumniId(list[0].id)
-          }
-        } else {
-          // Fallback to profiles table where role='alumni'
-          const { data: profiles } = await supabase
-            .from('profiles')
-            .select('id, full_name, role')
-            .eq('role', 'alumni')
-
-          if (profiles) {
-            const list = profiles.map((p) => ({
-              id: p.id,
-              full_name: p.full_name,
-              company: null,
-              role: p.role,
-            }))
-            setAlumniList(list)
-            if (!selectedAlumniId && list.length > 0) {
-              setSelectedAlumniId(list[0].id)
-            }
           }
         }
       } catch (err) {
@@ -113,7 +78,7 @@ export default function ResumeReviewModal({
     }
 
     fetchAlumni()
-  }, [isOpen, supabase, selectedAlumniId])
+  }, [isOpen, selectedAlumniId])
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -139,37 +104,35 @@ export default function ResumeReviewModal({
 
     setIsUploading(true)
     try {
-      // 1. Upload to Supabase Storage bucket 'resumes'
-      const fileExt = resumeFile.name.split('.').pop()
-      const fileName = `${studentId}-${Date.now()}.${fileExt}`
-      const filePath = `reviews/${fileName}`
-
-      const { error: uploadError } = await supabase.storage
-        .from('resumes')
-        .upload(filePath, resumeFile, { upsert: true })
-
-      if (uploadError) throw uploadError
-      const { data } = supabase.storage.from('resumes').getPublicUrl(filePath)
-      const publicUrl = data.publicUrl
-
-      // 2. Insert into resume_reviews table
-      const { error: reviewError } = await supabase.from('resume_reviews').insert({
-        student_id: studentId,
-        alumni_id: selectedAlumniId,
-        status: 'pending',
-      })
-
-      // 3. Also insert into requests table with document URL and message
-      const { error: requestError } = await supabase.from('requests').insert({
-        student_id: studentId,
-        alumni_id: selectedAlumniId,
-        type: 'resume',
-        message: notes.trim() || 'Please review my resume.',
-        document_url: publicUrl,
-      })
-      if (requestError) throw requestError
-
-      if (reviewError) throw reviewError
+      const file = await storage.createFile(
+        process.env.NEXT_PUBLIC_RESUMES_BUCKET_ID || 'resumes',
+        ID.unique(),
+        resumeFile,
+      )
+      await tablesDB.createRow(
+        process.env.NEXT_PUBLIC_DATABASE_ID!,
+        'resume_reviews',
+        ID.unique(),
+        {
+          studentId,
+          alumniId: selectedAlumniId,
+          status: 'pending',
+          resumeUrl: file.$id,
+        },
+      )
+      await tablesDB.createRow(
+        process.env.NEXT_PUBLIC_DATABASE_ID!,
+        'requests',
+        ID.unique(),
+        {
+          studentId,
+          alumniId: selectedAlumniId,
+          type: 'resume',
+          status: 'pending',
+          message: notes.trim() || 'Please review my resume.',
+          documentUrl: file.$id,
+        },
+      )
 
       toast.success('Resume submitted for review!')
       setResumeFile(null)

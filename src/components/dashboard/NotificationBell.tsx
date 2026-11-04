@@ -1,13 +1,14 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Bell, Check, Loader2 } from 'lucide-react'
-import { createClient } from '@/lib/supabase/client'
+import { account, tablesDB, client } from '@/lib/appwrite/client'
+import { APPWRITE_TABLE_IDS } from '@/lib/appwrite/tables'
+import { Query } from 'appwrite'
 import type { Notification } from '@/types/database'
 
 export default function NotificationBell() {
-  const supabase = useMemo(() => createClient(), [])
   const [userId, setUserId] = useState<string | null>(null)
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [isOpen, setIsOpen] = useState(false)
@@ -17,23 +18,33 @@ export default function NotificationBell() {
     let active = true
 
     const loadNotifications = async () => {
-      const { data: { user }, error: authError } = await supabase.auth.getUser()
-      if (authError || !user) {
+      let user
+      try {
+        user = await account.get()
+      } catch {
         if (active) setIsLoading(false)
         return
       }
 
-      setUserId(user.id)
-      const { data, error } = await supabase
-        .from('notifications')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(20)
-
-      if (error) {
+      setUserId(user.$id)
+      try {
+        const result = await tablesDB.listRows(
+          process.env.NEXT_PUBLIC_DATABASE_ID!,
+          'notifications',
+          [Query.equal('userId', user.$id), Query.orderDesc('$createdAt'), Query.limit(20)],
+        )
+        if (active) {
+          setNotifications(result.rows.map((item) => ({
+            id: item.$id,
+            user_id: item.userId,
+            content: item.content,
+            is_read: item.isRead ?? false,
+            created_at: item.$createdAt,
+            link: item.link,
+          })) as Notification[])
+        }
+      } catch (error) {
         console.error('Failed to load notifications:', error)
-      } else if (active) {
-        setNotifications((data || []) as Notification[])
       }
       if (active) setIsLoading(false)
     }
@@ -42,45 +53,48 @@ export default function NotificationBell() {
     return () => {
       active = false
     }
-  }, [supabase])
+  }, [])
 
   useEffect(() => {
     if (!userId) return
 
-    const channel = supabase
-      .channel(`notifications-${userId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'notifications',
-          filter: `user_id=eq.${userId}`,
-        },
-        (payload) => {
-          setNotifications((current) => [
-            payload.new as Notification,
-            ...current.filter((notification) => notification.id !== payload.new.id),
-          ].slice(0, 20))
-        }
-      )
-      .subscribe()
+    const unsubscribe = client.subscribe(
+      [`tablesdb.${process.env.NEXT_PUBLIC_DATABASE_ID}.tables.${APPWRITE_TABLE_IDS.notifications}.rows`],
+      (event) => {
+        const item = event.payload as Record<string, unknown>
+        if (item.userId !== userId) return
+        const notification = {
+          id: item.$id as string,
+          user_id: item.userId as string,
+          content: item.content as string,
+          is_read: Boolean(item.isRead),
+          created_at: item.$createdAt as string,
+          link: item.link as string | undefined,
+        } as Notification
+        setNotifications((current) => [
+          notification,
+          ...current.filter((entry) => entry.id !== notification.id),
+        ].slice(0, 20))
+      },
+    )
 
     return () => {
-      supabase.removeChannel(channel)
+      unsubscribe()
     }
-  }, [supabase, userId])
+  }, [userId])
 
   const unreadCount = notifications.filter((notification) => !notification.is_read).length
 
   const markAsRead = async (notification: Notification) => {
     if (!notification.is_read) {
-      const { error } = await supabase
-        .from('notifications')
-        .update({ is_read: true })
-        .eq('id', notification.id)
-
-      if (error) {
+      try {
+        await tablesDB.updateRow(
+          process.env.NEXT_PUBLIC_DATABASE_ID!,
+          'notifications',
+          notification.id,
+          { isRead: true },
+        )
+      } catch (error) {
         console.error('Failed to mark notification as read:', error)
         return
       }
@@ -94,13 +108,21 @@ export default function NotificationBell() {
 
   const markAllAsRead = async () => {
     if (!userId || unreadCount === 0) return
-    const { error } = await supabase
-      .from('notifications')
-      .update({ is_read: true })
-      .eq('user_id', userId)
-      .eq('is_read', false)
-
-    if (error) {
+    try {
+      const unread = await tablesDB.listRows(
+        process.env.NEXT_PUBLIC_DATABASE_ID!,
+        'notifications',
+        [Query.equal('userId', userId), Query.equal('isRead', false)],
+      )
+      await Promise.all(unread.rows.map((notification) =>
+        tablesDB.updateRow(
+          process.env.NEXT_PUBLIC_DATABASE_ID!,
+          'notifications',
+          notification.$id,
+          { isRead: true },
+        )
+      ))
+    } catch (error) {
       console.error('Failed to mark notifications as read:', error)
       return
     }

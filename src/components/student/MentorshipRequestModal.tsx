@@ -1,7 +1,8 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { createClient } from '@/lib/supabase/client'
+import { tablesDB } from '@/lib/appwrite/client'
+import { ID, Query } from 'appwrite'
 import {
   Dialog,
   DialogContent,
@@ -15,7 +16,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Loader2, Calendar, MessageSquare, Clock, CheckCircle2, Sparkles, GraduationCap } from 'lucide-react'
+import { Loader2, MessageSquare, Clock, CheckCircle2, Sparkles, GraduationCap } from 'lucide-react'
 import { toast } from 'sonner'
 import Link from 'next/link'
 
@@ -52,7 +53,6 @@ export default function MentorshipRequestModal({
   studentId,
   onSuccess,
 }: MentorshipRequestModalProps) {
-  const supabase = createClient()
   const [topic, setTopic] = useState('Career Transition & Growth')
   const [pitch, setPitch] = useState('')
   const [proposedDate, setProposedDate] = useState('')
@@ -63,8 +63,6 @@ export default function MentorshipRequestModal({
 
   useEffect(() => {
     if (!isOpen || !alumni || !studentId) {
-      setExistingStatus(null)
-      setExistingMessage(null)
       return
     }
 
@@ -72,30 +70,35 @@ export default function MentorshipRequestModal({
       setIsChecking(true)
       try {
         // Check mentorship_sessions table
-        const { data: session } = await supabase
-          .from('mentorship_sessions')
-          .select('id, status, topic, pitch, message')
-          .eq('student_id', studentId)
-          .eq('alumni_id', alumni.id)
-          .in('status', ['pending', 'accepted', 'completed'])
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle()
+        const sessions = await tablesDB.listRows(
+          process.env.NEXT_PUBLIC_DATABASE_ID!,
+          'mentorship_sessions',
+          [
+            Query.equal('studentId', studentId),
+            Query.equal('alumniId', alumni.id),
+            Query.equal('status', ['pending', 'accepted', 'completed']),
+            Query.orderDesc('$createdAt'),
+            Query.limit(1),
+          ],
+        )
+        const session = sessions.rows[0]
 
         if (session) {
           setExistingStatus(session.status as MentorshipStatus)
           setExistingMessage(session.pitch || session.message || session.topic || null)
         } else {
-          // Fallback check in requests table
-          const { data: req } = await supabase
-            .from('requests')
-            .select('id, message')
-            .eq('student_id', studentId)
-            .eq('alumni_id', alumni.id)
-            .eq('type', 'mentorship')
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .maybeSingle()
+          const requests = await tablesDB.listRows(
+            process.env.NEXT_PUBLIC_DATABASE_ID!,
+            'requests',
+            [
+              Query.equal('studentId', studentId),
+              Query.equal('alumniId', alumni.id),
+              Query.equal('type', 'mentorship'),
+              Query.orderDesc('$createdAt'),
+              Query.limit(1),
+            ],
+          )
+          const req = requests.rows[0]
 
           if (req) {
             setExistingStatus('pending')
@@ -113,7 +116,7 @@ export default function MentorshipRequestModal({
     }
 
     checkExisting()
-  }, [isOpen, alumni, studentId, supabase])
+  }, [isOpen, alumni, studentId])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -127,33 +130,32 @@ export default function MentorshipRequestModal({
     setIsSubmitting(true)
     try {
       // 1. Insert into mentorship_sessions table
-      const { error: sessionError } = await supabase
-        .from('mentorship_sessions')
-        .insert({
-          student_id: studentId,
-          alumni_id: alumni.id,
-          topic: topic,
+      await tablesDB.createRow(
+        process.env.NEXT_PUBLIC_DATABASE_ID!,
+        'mentorship_sessions',
+        ID.unique(),
+        {
+          studentId,
+          alumniId: alumni.id,
+          topic,
+          pitch: pitch.trim(),
           message: pitch.trim(),
-          scheduled_at: proposedDate ? new Date(proposedDate).toISOString() : null,
+          scheduledAt: proposedDate ? new Date(proposedDate).toISOString() : null,
           status: 'pending',
-        })
-
-      // 2. Also record in requests table for cross-table compatibility
-      const { error: requestError } = await supabase.from('requests').insert({
-        student_id: studentId,
-        alumni_id: alumni.id,
-        type: 'mentorship',
-        message: `${topic}: ${pitch.trim()}`,
-      })
-      if (requestError) throw requestError
-
-      if (sessionError) {
-        const message = sessionError.message.includes('monthly mentorship session limit')
-          ? 'This alumni has reached their monthly mentorship session limit.'
-          : sessionError.message
-        toast.error('Could not send mentorship request', { description: message })
-        return
-      }
+        },
+      )
+      await tablesDB.createRow(
+        process.env.NEXT_PUBLIC_DATABASE_ID!,
+        'requests',
+        ID.unique(),
+        {
+          studentId,
+          alumniId: alumni.id,
+          type: 'mentorship',
+          message: `${topic}: ${pitch.trim()}`,
+          status: 'pending',
+        },
+      )
 
       toast.success('Mentorship request sent successfully!')
       setPitch('')

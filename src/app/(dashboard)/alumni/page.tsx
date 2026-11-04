@@ -3,7 +3,8 @@
 import { useState, useEffect, useMemo, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { createClient } from '@/lib/supabase/client'
+import { account, tablesDB } from '@/lib/appwrite/client'
+import { Query } from 'appwrite'
 import {
   Search,
   Users,
@@ -56,7 +57,6 @@ interface EnrichedAlumni {
 function AlumniDirectoryContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
-  const supabase = useMemo(() => createClient(), [])
 
   const [studentId, setStudentId] = useState<string | null>(null)
   const [alumniList, setAlumniList] = useState<EnrichedAlumni[]>([])
@@ -88,120 +88,135 @@ function AlumniDirectoryContent() {
   }, [searchQuery, selectedCompany, selectedIndustry, selectedSkill, referralsOnly])
 
   const fetchAlumniAndRequests = async () => {
-    setIsLoading(true)
     try {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) {
+      let user
+      try {
+        user = await account.get()
+      } catch {
         router.push('/login')
         return
       }
-      setStudentId(user.id)
+      setStudentId(user.$id)
+      const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!
 
       // Fetch student's existing mentorship requests to display accurate status on cards
-      const { data: studentSessions } = await supabase
-        .from('mentorship_sessions')
-        .select('alumni_id, status')
-        .eq('student_id', user.id)
+      const [studentSessions, studentLegacyReqs] = await Promise.all([
+        tablesDB.listRows(databaseId, 'mentorship_sessions', [
+          Query.equal('studentId', user.$id),
+          Query.limit(5000),
+        ]),
+        tablesDB.listRows(databaseId, 'requests', [
+          Query.equal('studentId', user.$id),
+          Query.limit(5000),
+        ]),
+      ])
 
-      const { data: studentLegacyReqs } = await supabase
-        .from('requests')
-        .select('alumni_id, type')
-        .eq('student_id', user.id)
-
-      const statusMap = new Map<string, string>()
-      studentSessions?.forEach((s) => statusMap.set(s.alumni_id, s.status))
-      studentLegacyReqs?.forEach((r) => {
-        if (r.type === 'mentorship' && !statusMap.has(r.alumni_id)) {
-          statusMap.set(r.alumni_id, 'pending')
+      const statusMap = new Map<string, EnrichedAlumni['mentorshipStatus']>()
+      studentSessions.rows.forEach((session) => statusMap.set(session.alumniId, session.status))
+      studentLegacyReqs.rows.forEach((request) => {
+        if (request.type === 'mentorship' && !statusMap.has(request.alumniId)) {
+          statusMap.set(request.alumniId, 'pending')
         }
       })
 
       // Query alumni profiles joined with profiles and profile_skills
       // 1. Try fetching from alumni_profiles
       let enriched: EnrichedAlumni[] = []
-      const { data: alumniProfiles, error: alumniErr } = await supabase
-        .from('alumni_profiles')
-        .select(`
-          profile_id,
-          company,
-          job_title,
-          industry,
-          years_of_experience,
-          is_verified,
-          profile:profiles (
-            id,
-            full_name,
-            avatar_url,
-            headline,
-            bio,
-            role
-          )
-        `)
+      const alumniProfiles = await tablesDB.listRows(databaseId, 'alumni_profiles', [Query.limit(5000)])
 
-      if (alumniProfiles && alumniProfiles.length > 0) {
+      if (alumniProfiles.rows.length > 0) {
         // Fetch skills for these profiles
-        const profileIds = alumniProfiles.map((a: any) => a.profile_id).filter(Boolean)
-        const { data: skillRows } = await supabase
-          .from('profile_skills')
-          .select('profile_id, skill:skills(name)')
-          .in('profile_id', profileIds)
+        const profileIds = alumniProfiles.rows
+          .map((alumni) => alumni.profileId)
+          .filter((profileId): profileId is string => Boolean(profileId))
+        const [profileResult, skillRows, skills] = await Promise.all([
+          profileIds.length
+            ? tablesDB.listRows(databaseId, 'profiles', [
+                Query.equal('userId', profileIds),
+                Query.limit(5000),
+              ])
+            : Promise.resolve(null),
+          profileIds.length
+            ? tablesDB.listRows(databaseId, 'profile_skills', [
+                Query.equal('profileId', profileIds),
+                Query.limit(5000),
+              ])
+            : Promise.resolve({ rows: [] }),
+          tablesDB.listRows(databaseId, 'skills', [Query.limit(5000)]),
+        ])
 
+        type ProfileFields = {
+          $id: string
+          userId?: string
+          fullName?: string
+          avatarUrl?: string
+          headline?: string
+          bio?: string
+          role?: string
+        }
+        const profileMap = new Map<string, ProfileFields>()
+        profileResult?.rows.forEach((profile) => {
+          profileMap.set(profile.userId || profile.$id, profile)
+        })
+        const skillMap = new Map(skills.rows.map((skill) => [skill.$id, skill.name]))
         const skillsMap = new Map<string, string[]>()
-        skillRows?.forEach((row: any) => {
-          const list = skillsMap.get(row.profile_id) || []
-          if (row.skill?.name) list.push(row.skill.name)
-          skillsMap.set(row.profile_id, list)
+        skillRows.rows.forEach((row) => {
+          const list = skillsMap.get(row.profileId) || []
+          const skillName = skillMap.get(row.skillId)
+          if (skillName) list.push(skillName)
+          skillsMap.set(row.profileId, list)
         })
 
-        enriched = alumniProfiles.map((a: any) => {
-          const p = a.profile || {}
-          const alumniUserId = p.id || a.profile_id
-          const currentSkills = skillsMap.get(a.profile_id) || []
+        enriched = alumniProfiles.rows.map((alumni) => {
+          const profileId = alumni.profileId || alumni.$id
+          const profile = profileMap.get(profileId)
+          const alumniUserId = profile?.userId || profile?.$id || profileId
+          const company = alumni.company || null
+          const jobTitle = alumni.jobTitle || null
+          const currentSkills = skillsMap.get(profileId) || []
 
           return {
-            id: a.profile_id,
+            id: profileId,
             user_id: alumniUserId,
-            full_name: p.full_name || 'Alumni Member',
-            avatar_url: p.avatar_url,
-            headline: p.headline || (a.job_title && a.company ? `${a.job_title} at ${a.company}` : null),
-            bio: p.bio,
-            company: a.company,
-            role: a.job_title || p.headline || p.role,
-            industry: a.industry,
-            years_of_experience: a.years_of_experience,
-            open_to_referrals: true,
-            open_to_mentorship: true,
-            is_verified: Boolean(a.is_verified ?? true),
+            full_name: profile?.fullName || 'Alumni Member',
+            avatar_url: profile?.avatarUrl,
+            headline: profile?.headline || (jobTitle && company ? `${jobTitle} at ${company}` : null),
+            bio: profile?.bio,
+            company,
+            role: jobTitle || profile?.headline || profile?.role,
+            industry: alumni.industry || null,
+            years_of_experience: alumni.yearsOfExperience,
+            open_to_referrals: alumni.openToReferrals ?? true,
+            open_to_mentorship: alumni.openToMentorship ?? true,
+            is_verified: Boolean(alumni.isVerified ?? true),
             skills: currentSkills,
-            mentorshipStatus: (statusMap.get(alumniUserId) as any) || null,
+            mentorshipStatus: statusMap.get(alumniUserId) || null,
           }
         })
       } else {
         // Fallback: Fetch directly from profiles table where role='alumni'
-        const { data: profilesData } = await supabase
-          .from('profiles')
-          .select('*')
-          .eq('role', 'alumni')
+        const profilesData = await tablesDB.listRows(databaseId, 'profiles', [
+          Query.equal('role', 'alumni'),
+          Query.limit(5000),
+        ])
 
-        if (profilesData) {
-          enriched = profilesData.map((p: any) => ({
-            id: p.id,
-            user_id: p.id,
-            full_name: p.full_name,
-            avatar_url: p.avatar_url,
-            headline: p.headline || p.role,
-            bio: p.bio,
+        enriched = profilesData.rows.map((profile) => ({
+            id: profile.userId || profile.$id,
+            user_id: profile.userId || profile.$id,
+            full_name: profile.fullName || 'Alumni Member',
+            avatar_url: profile.avatarUrl,
+            headline: profile.headline || profile.role,
+            bio: profile.bio,
             company: null,
-            role: p.role,
+            role: profile.role,
             industry: null,
             years_of_experience: null,
             open_to_referrals: true,
             open_to_mentorship: true,
             is_verified: true,
             skills: [],
-            mentorshipStatus: (statusMap.get(p.id) as any) || null,
+            mentorshipStatus: statusMap.get(profile.userId || profile.$id) || null,
           }))
-        }
       }
 
       setAlumniList(enriched)
@@ -215,7 +230,7 @@ function AlumniDirectoryContent() {
 
   useEffect(() => {
     fetchAlumniAndRequests()
-  }, [supabase, router])
+  }, [router])
 
   // Extract distinct filter values
   const allCompanies = useMemo(() => {

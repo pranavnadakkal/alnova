@@ -1,7 +1,9 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
-import { createClient } from '@/lib/supabase/client'
+import { useState, useEffect } from 'react'
+import { account, client, tablesDB, storage } from '@/lib/appwrite/client'
+import { APPWRITE_TABLE_IDS } from '@/lib/appwrite/tables'
+import { ID, Query, type Models } from 'appwrite'
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -21,8 +23,34 @@ type AnnouncementWithAuthor = Announcement & {
   profiles?: Profile
 }
 
+type AnnouncementDocument = Models.Row & {
+  authorId?: string
+  author_id?: string
+  title?: string
+  content?: string
+  eventDate?: string | null
+  event_date?: string | null
+  priority?: AnnouncementPriority
+  posterUrl?: string | null
+  poster_url?: string | null
+  updatedAt?: string
+}
+
+function mapAnnouncement(document: AnnouncementDocument): AnnouncementWithAuthor {
+  return {
+    id: document.$id,
+    author_id: document.authorId || document.author_id || '',
+    title: document.title || '',
+    content: document.content || '',
+    event_date: document.eventDate || document.event_date || null,
+    priority: document.priority || 'normal',
+    poster_url: document.posterUrl || document.poster_url || null,
+    created_at: document.$createdAt,
+    updated_at: document.updatedAt || document.$updatedAt,
+  }
+}
+
 export default function AnnouncementsPage() {
-  const supabase = useMemo(() => createClient(), [])
   const [userId, setUserId] = useState<string | null>(null)
   const [userRole, setUserRole] = useState<string | null>(null)
   const [userName, setUserName] = useState('')
@@ -52,65 +80,46 @@ export default function AnnouncementsPage() {
       setIsLoading(true)
       setLoadError(null)
       try {
-        const { data: { user }, error: authError } = await supabase.auth.getUser()
-        if (authError) throw authError
-        if (!user) return
-        setUserId(user.id)
+        const user = await account.get()
+        setUserId(user.$id)
+        const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!
+        const [profileResult, announcementResult] = await Promise.all([
+          tablesDB.listRows(databaseId, 'profiles', [Query.equal('userId', user.$id)]),
+          tablesDB.listRows(databaseId, 'announcements', [
+            Query.orderDesc('$createdAt'),
+            Query.limit(5000),
+          ]),
+        ])
+        const profile = profileResult.rows[0]
+        if (!profile) throw new Error('Your account profile could not be found.')
+        setUserName(profile.fullName || '')
+        setUserRole(profile.role || null)
 
-        // Get user role from users table
-        const { data: userData, error: userError } = await supabase
-          .from('users')
-          .select('role')
-          .eq('id', user.id)
-          .single()
-        let role = userData?.role
-        let { data: profileData, error: profileError } = await supabase
-          .from('profiles')
-          .select('full_name, role')
-          .eq('id', user.id)
-          .maybeSingle()
-
-        if (!profileData && !profileError) {
-          const legacyProfile = await supabase
-            .from('profiles')
-            .select('full_name, role')
-            .eq('user_id', user.id)
-            .maybeSingle()
-          profileData = legacyProfile.data
-          profileError = legacyProfile.error
-        }
-        if (profileData) {
-          setUserName(profileData.full_name)
-          role = role || profileData.role
-        }
-        if (userError && !profileData) {
-          throw userError
-        }
-        setUserRole(role)
-
-        const { data: announcementsData, error: announcementsError } = await supabase
-          .from('announcements')
-          .select('*')
-          .order('created_at', { ascending: false })
-
-        if (announcementsError) throw announcementsError
-        const authorIds = Array.from(new Set((announcementsData || []).map((a) => a.author_id)))
-        let { data: authorProfiles, error: authorProfilesError } = authorIds.length
-          ? await supabase.from('profiles').select('*').in('id', authorIds)
-          : { data: [], error: null }
-        if (!authorProfiles?.length && !authorProfilesError) {
-          const legacyAuthors = authorIds.length
-            ? await supabase.from('profiles').select('*').in('user_id', authorIds)
-            : { data: [], error: null }
-          authorProfiles = legacyAuthors.data
-          authorProfilesError = legacyAuthors.error
-        }
-        if (authorProfilesError) throw authorProfilesError
-        const authorMap = new Map((authorProfiles || []).map((profile) => [profile.user_id || profile.id, profile]))
-        setAnnouncements((announcementsData || []).map((announcement) => ({
+        const announcementsData = announcementResult.rows.map((document) =>
+          mapAnnouncement(document as AnnouncementDocument),
+        )
+        const authorIds = [...new Set(announcementsData.map((announcement) => announcement.author_id))]
+        const authorResult = authorIds.length
+          ? await tablesDB.listRows(databaseId, 'profiles', [
+              Query.equal('userId', authorIds),
+              Query.limit(5000),
+            ])
+          : { rows: [] }
+        const authorMap = new Map(authorResult.rows.map((author) => [
+          author.userId || author.$id,
+          {
+            id: author.$id,
+            user_id: author.userId || author.$id,
+            email: author.email || '',
+            full_name: author.fullName || 'Unknown author',
+            avatar_url: author.avatarUrl || null,
+            role: author.role || 'teacher',
+            tech_skills: author.techSkills || [],
+          } as Profile,
+        ]))
+        setAnnouncements(announcementsData.map((announcement) => ({
           ...announcement,
-          profiles: authorMap.get(announcement.author_id)
-            || (authorProfiles || []).find((profile) => profile.id === announcement.author_id),
+          profiles: authorMap.get(announcement.author_id),
         })))
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unable to load announcements.'
@@ -122,46 +131,52 @@ export default function AnnouncementsPage() {
     }
 
     fetchData()
-  }, [supabase])
+  }, [])
 
   // Realtime subscription for new announcements
   useEffect(() => {
-    const channel = supabase
-      .channel('announcements-realtime')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'announcements' },
-        async (payload) => {
-          if (payload.eventType === 'INSERT') {
-            // Fetch the new announcement with author profile
-            const { data } = await supabase
-              .from('announcements')
-              .select('*')
-              .eq('id', payload.new.id)
-              .single()
-            if (data) {
-              setAnnouncements(prev => [data, ...prev])
-            }
-          } else if (payload.eventType === 'UPDATE') {
-            const { data } = await supabase
-              .from('announcements')
-              .select('*')
-              .eq('id', payload.new.id)
-              .single()
-            if (data) {
-              setAnnouncements(prev => prev.map(a => a.id === data.id ? data : a))
-            }
-          } else if (payload.eventType === 'DELETE') {
-            setAnnouncements(prev => prev.filter(a => a.id !== payload.old.id))
-          }
+    const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!
+    const unsubscribe = client.subscribe(
+      [`tablesdb.${databaseId}.tables.${APPWRITE_TABLE_IDS.announcements}.rows`],
+      async () => {
+        try {
+          const result = await tablesDB.listRows(databaseId, 'announcements', [
+            Query.orderDesc('$createdAt'),
+            Query.limit(5000),
+          ])
+          const nextAnnouncements = result.rows.map((document) =>
+            mapAnnouncement(document as AnnouncementDocument),
+          )
+          const authorIds = [...new Set(nextAnnouncements.map((announcement) => announcement.author_id))]
+          const authors = authorIds.length
+            ? await tablesDB.listRows(databaseId, 'profiles', [
+                Query.equal('userId', authorIds),
+                Query.limit(5000),
+              ])
+            : { rows: [] }
+          const authorMap = new Map(authors.rows.map((author) => [
+            author.userId || author.$id,
+            {
+              id: author.$id,
+              user_id: author.userId || author.$id,
+              email: author.email || '',
+              full_name: author.fullName || 'Unknown author',
+              avatar_url: author.avatarUrl || null,
+              role: author.role || 'teacher',
+              tech_skills: author.techSkills || [],
+            } as Profile,
+          ]))
+          setAnnouncements(nextAnnouncements.map((announcement) => ({
+            ...announcement,
+            profiles: authorMap.get(announcement.author_id),
+          })))
+        } catch (error) {
+          console.error('Failed to refresh announcements:', error)
         }
-      )
-      .subscribe()
-
-    return () => {
-      supabase.removeChannel(channel)
-    }
-  }, [supabase])
+      },
+    )
+    return () => unsubscribe()
+  }, [])
 
   const isTeacher = userRole === 'teacher'
 
@@ -185,70 +200,54 @@ export default function AnnouncementsPage() {
         setIsSubmitting(false)
         return
       }
-      const path = `${userId}/${crypto.randomUUID()}-${posterFile.name.replace(/[^a-zA-Z0-9._-]/g, '-')}`
-      const { error: uploadError } = await supabase.storage
-        .from('announcement-posters')
-        .upload(path, posterFile, { contentType: posterFile.type })
-      if (uploadError) {
-        toast.error('Failed to upload poster', { description: uploadError.message })
+      try {
+        const bucketId = process.env.NEXT_PUBLIC_ANNOUNCEMENT_POSTERS_BUCKET_ID || 'announcement-posters'
+        const uploaded = await storage.createFile(bucketId, ID.unique(), posterFile)
+        uploadedPosterUrl = storage.getFileView(bucketId, uploaded.$id).toString()
+      } catch (uploadError) {
+        toast.error('Failed to upload poster', {
+          description: uploadError instanceof Error ? uploadError.message : 'Please try again.',
+        })
         setIsSubmitting(false)
         return
       }
-      uploadedPosterUrl = supabase.storage.from('announcement-posters').getPublicUrl(path).data.publicUrl
     }
 
     if (editingId) {
-      // Update existing
-      const { error } = await supabase
-        .from('announcements')
-        .update({
+      try {
+        await tablesDB.updateRow(process.env.NEXT_PUBLIC_DATABASE_ID!, 'announcements', editingId, {
           title: formTitle.trim(),
           content: formContent.trim(),
-          event_date: formEventDate ? new Date(formEventDate).toISOString() : null,
+          eventDate: formEventDate ? new Date(formEventDate).toISOString() : null,
           priority: formPriority,
-          poster_url: uploadedPosterUrl,
-          updated_at: new Date().toISOString(),
+          posterUrl: uploadedPosterUrl,
+          updatedAt: new Date().toISOString(),
         })
-        .eq('id', editingId)
-
-      if (error) {
-        toast.error('Failed to update announcement', { description: error.message })
-      } else {
         toast.success('Announcement updated successfully!')
         setDialogOpen(false)
         resetForm()
+      } catch (error) {
+        toast.error('Failed to update announcement', {
+          description: error instanceof Error ? error.message : 'Please try again.',
+        })
       }
     } else {
-      // Create new
-      const announcement = {
-        author_id: userId,
-        title: formTitle.trim(),
-        content: formContent.trim(),
-        event_date: formEventDate ? new Date(formEventDate).toISOString() : null,
-        priority: formPriority,
-        poster_url: uploadedPosterUrl,
-      }
-      let { error } = await supabase.from('announcements').insert(announcement)
-
-      // Older databases may have the original three-column announcements table.
-      if (error && /column .*announcements.*schema cache/i.test(error.message)) {
-        const fallback = await supabase
-          .from('announcements')
-          .insert({
-            author_id: announcement.author_id,
-            title: announcement.title,
-            content: announcement.content,
-            ...(uploadedPosterUrl ? { poster_url: uploadedPosterUrl } : {}),
-          })
-        error = fallback.error
-      }
-
-      if (error) {
-        toast.error('Failed to post announcement', { description: error.message })
-      } else {
+      try {
+        await tablesDB.createRow(process.env.NEXT_PUBLIC_DATABASE_ID!, 'announcements', ID.unique(), {
+          authorId: userId,
+          title: formTitle.trim(),
+          content: formContent.trim(),
+          eventDate: formEventDate ? new Date(formEventDate).toISOString() : null,
+          priority: formPriority,
+          posterUrl: uploadedPosterUrl,
+        })
         toast.success('Announcement posted!')
         setDialogOpen(false)
         resetForm()
+      } catch (error) {
+        toast.error('Failed to post announcement', {
+          description: error instanceof Error ? error.message : 'Please try again.',
+        })
       }
     }
 
@@ -257,13 +256,14 @@ export default function AnnouncementsPage() {
 
   const handleDelete = async (id: string) => {
     setIsDeleting(true)
-    const { error } = await supabase.from('announcements').delete().eq('id', id)
-
-    if (error) {
-      toast.error('Failed to delete announcement', { description: error.message })
-    } else {
+    try {
+      await tablesDB.deleteRow(process.env.NEXT_PUBLIC_DATABASE_ID!, 'announcements', id)
       toast.success('Announcement deleted')
       setDeletingId(null)
+    } catch (error) {
+      toast.error('Failed to delete announcement', {
+        description: error instanceof Error ? error.message : 'Please try again.',
+      })
     }
     setIsDeleting(false)
   }

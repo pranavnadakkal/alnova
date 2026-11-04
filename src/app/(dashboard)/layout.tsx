@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation'
-import Link from 'next/link'
-import { createClient } from '@/lib/supabase/server'
+import { createSessionClient } from '@/lib/appwrite/server'
+import { Query } from 'node-appwrite'
 import Sidebar from '@/components/dashboard/Sidebar'
 import TopBar from '@/components/dashboard/TopBar'
 
@@ -9,29 +9,23 @@ export default async function DashboardLayout({
 }: {
   children: React.ReactNode
 }) {
-  const supabase = await createClient()
-
-  const { data: { user } } = await supabase.auth.getUser()
-
-  if (!user) {
+  let user
+  let sessionTables
+  try {
+    const sessionClient = await createSessionClient()
+    const { account } = sessionClient
+    sessionTables = sessionClient.tablesDB
+    user = await account.get()
+  } catch {
     redirect('/login')
   }
 
-  let { data: profile, error: profileError } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('user_id', user.id)
-    .maybeSingle()
-
-  if (profileError?.message.includes('profiles.user_id')) {
-    const legacyProfile = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', user.id)
-      .maybeSingle()
-    profile = legacyProfile.data
-    profileError = legacyProfile.error
-  }
+  const profiles = await sessionTables.listRows(
+    process.env.NEXT_PUBLIC_DATABASE_ID!,
+    'profiles',
+    [Query.equal('userId', user.$id)],
+  )
+  const profile = profiles.rows[0]
 
   if (!profile) {
     redirect('/onboarding')
@@ -47,7 +41,7 @@ export default async function DashboardLayout({
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top Bar */}
-        <TopBar profile={{ full_name: profile.full_name, role: userType }} />
+        <TopBar profile={{ full_name: profile.fullName || profile.full_name, role: userType }} />
 
         {/* Page Content */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 overflow-auto">

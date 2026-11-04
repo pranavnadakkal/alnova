@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { createClient } from '@/lib/supabase/client'
+import { account } from '@/lib/appwrite/client'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import * as z from 'zod'
@@ -22,7 +22,6 @@ type ForgotPasswordFormData = z.infer<typeof forgotPasswordSchema>
 
 export default function ForgotPasswordPage() {
   const router = useRouter()
-  const supabase = createClient()
   const [isLoading, setIsLoading] = useState(false)
   const [success, setSuccess] = useState(false)
   const [serverError, setServerError] = useState<string | null>(null)
@@ -40,13 +39,12 @@ export default function ForgotPasswordPage() {
     setIsLoading(true)
     setServerError(null)
     
-    const { error } = await supabase.auth.resetPasswordForEmail(data.email, {
-      redirectTo: `${window.location.origin}/reset-password`,
-    })
-
-    if (error) {
-      setServerError(error.message)
-      toast.error(error.message)
+    try {
+      await account.createRecovery(data.email, `${window.location.origin}/reset-password`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to send password reset link.'
+      setServerError(message)
+      toast.error(message)
       setIsLoading(false)
       return
     }

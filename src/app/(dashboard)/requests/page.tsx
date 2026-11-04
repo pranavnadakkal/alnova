@@ -1,7 +1,8 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
-import { createClient } from '@/lib/supabase/client'
+import { useState, useEffect } from 'react'
+import { account, tablesDB, storage } from '@/lib/appwrite/client'
+import { ID, Query } from 'appwrite'
 import { Card, CardHeader, CardTitle, CardContent, CardFooter, CardDescription } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -19,7 +20,6 @@ type ExtendedRequest = ConnectionRequest & {
 }
 
 export default function RequestsPage() {
-  const supabase = useMemo(() => createClient(), [])
   const [userId, setUserId] = useState<string | null>(null)
   const [userRole, setUserRole] = useState<'student' | 'alumni' | null>(null)
   const [requests, setRequests] = useState<ExtendedRequest[]>([])
@@ -41,75 +41,63 @@ export default function RequestsPage() {
       setIsLoading(true)
       setLoadError(null)
       try {
-      const { data: { user }, error: authError } = await supabase.auth.getUser()
-      if (authError) throw authError
-      if (!user) return
-      setUserId(user.id)
+      const user = await account.get()
+      setUserId(user.$id)
 
-      const { data: userData, error: userError } = await supabase.from('users').select('role').eq('id', user.id).single()
-      let role = userData?.role as 'student' | 'alumni' | undefined
-      if (!role || userError) {
-        let { data: profileRole } = await supabase
-          .from('profiles')
-          .select('role')
-          .eq('id', user.id)
-          .maybeSingle()
-        if (!profileRole) {
-          profileRole = (await supabase
-            .from('profiles')
-            .select('role')
-            .eq('user_id', user.id)
-            .maybeSingle()).data
-        }
-        role = profileRole?.role as 'student' | 'alumni' | undefined
-      }
-      if (!role) throw userError || new Error('Your account role is not set.')
+      const profileResult = await tablesDB.listRows(
+        process.env.NEXT_PUBLIC_DATABASE_ID!,
+        'profiles',
+        [Query.equal('userId', user.$id)],
+      )
+      const profile = profileResult.rows[0]
+      const role = profile?.role as 'student' | 'alumni' | undefined
+      if (!role) throw new Error('Your account role is not set.')
       setUserRole(role)
 
       // Fetch requests for this user
-      const idField = role === 'alumni' ? 'alumni_id' : 'student_id'
-      const { data: requestsData, error: requestsError } = await supabase
-        .from('requests')
-        .select('*')
-        .eq(idField, user.id)
-        .order('created_at', { ascending: false })
-
-      if (requestsError) throw requestsError
-      if (requestsData) {
+      const idField = role === 'alumni' ? 'alumniId' : 'studentId'
+      const requestsResult = await tablesDB.listRows(
+        process.env.NEXT_PUBLIC_DATABASE_ID!,
+        'requests',
+        [Query.equal(idField, user.$id), Query.orderDesc('$createdAt')],
+      )
+      if (requestsResult.rows) {
         // Fetch related profiles manually since we don't have a foreign key to profiles table directly in requests, just to users.
-        const studentIds = requestsData.map(r => r.student_id)
-        const alumniIds = requestsData.map(r => r.alumni_id)
-        
-        const [studentResult, alumniResult] = await Promise.all([
-          studentIds.length
-            ? supabase.from('profiles').select('*').in('id', studentIds)
-            : Promise.resolve({ data: [], error: null }),
-          alumniIds.length
-            ? supabase.from('profiles').select('*').in('id', alumniIds)
-            : Promise.resolve({ data: [], error: null }),
-        ])
-        if (studentResult.error || alumniResult.error) throw studentResult.error || alumniResult.error
-        const studentProfiles = studentResult.data
-        const alumniProfiles = alumniResult.data
+        const studentIds = requestsResult.rows.map(r => r.studentId)
+        const alumniIds = requestsResult.rows.map(r => r.alumniId)
+        const profileIds = Array.from(new Set([...studentIds, ...alumniIds]))
+        const profileResult = profileIds.length
+          ? await tablesDB.listRows(
+              process.env.NEXT_PUBLIC_DATABASE_ID!,
+              'profiles',
+              [Query.equal('userId', profileIds)],
+            )
+          : { rows: [] }
+        const profileMap = new Map(profileResult.rows.map(p => [p.userId, p]))
 
-        const enrichedRequests = requestsData.map(req => ({
-          ...req,
-          studentProfile: studentProfiles?.find(p => p.id === req.student_id || p.user_id === req.student_id),
-          alumniProfile: alumniProfiles?.find(p => p.id === req.alumni_id || p.user_id === req.alumni_id)
+        const enrichedRequests: ExtendedRequest[] = requestsResult.rows.map(req => ({
+          id: req.$id,
+          student_id: req.studentId,
+          alumni_id: req.alumniId,
+          type: req.type as ConnectionRequest['type'],
+          status: req.status as ConnectionRequest['status'],
+          message: req.message || '',
+          document_url: req.documentUrl,
+          created_at: req.$createdAt,
+          studentProfile: profileMap.get(req.studentId) as Profile | undefined,
+          alumniProfile: profileMap.get(req.alumniId) as Profile | undefined,
         }))
         setRequests(enrichedRequests)
       }
 
       // If student, fetch all alumni for dropdowns
       if (role === 'student') {
-        const { data: alumniUsers, error: alumniUsersError } = await supabase.from('users').select('id').eq('role', 'alumni')
-        if (alumniUsersError) throw alumniUsersError
-        if (alumniUsers) {
-          const ids = alumniUsers.map(a => a.id)
-          const { data: aProfiles, error: alumniProfilesError } = await supabase.from('profiles').select('*').in('id', ids)
-          if (alumniProfilesError) throw alumniProfilesError
-          if (aProfiles) setAvailableAlumni(aProfiles)
-        }
+        const alumniProfiles = await tablesDB.listRows(
+          process.env.NEXT_PUBLIC_DATABASE_ID!,
+          'profiles',
+          [Query.equal('role', 'alumni')],
+        )
+        setAvailableAlumni(alumniProfiles.rows as unknown as Profile[])
       }
 
       } catch (error) {
@@ -122,19 +110,23 @@ export default function RequestsPage() {
     }
 
     fetchData()
-  }, [supabase])
+  }, [])
 
   const updateRequestStatus = async (requestId: string, newStatus: RequestStatus) => {
     setUpdatingRequestId(requestId)
-    const { error } = await supabase.from('requests').update({ status: newStatus }).eq('id', requestId)
-    if (!error) {
+    try {
+      await tablesDB.updateRow(
+        process.env.NEXT_PUBLIC_DATABASE_ID!,
+        'requests',
+        requestId,
+        { status: newStatus },
+      )
       setRequests(current => current.map(req => req.id === requestId ? { ...req, status: newStatus } : req))
       toast.success(`Request marked as ${newStatus}.`)
-    } else {
-      const description = error.message.includes('column requests.status does not exist')
-        ? 'Apply supabase/migrations/19_request_status_compatibility.sql before changing request statuses.'
-        : error.message
-      toast.error('Failed to update request', { description })
+    } catch (error) {
+      toast.error('Failed to update request', {
+        description: error instanceof Error ? error.message : 'Please try again.',
+      })
     }
     setUpdatingRequestId(null)
   }
@@ -147,38 +139,33 @@ export default function RequestsPage() {
     }
     setIsUploading(true)
 
-    const fileExt = resumeFile.name.split('.').pop()
-    const fileName = `${userId}-${Math.random()}.${fileExt}`
-    const filePath = `${fileName}`
-
-    const { error: uploadError } = await supabase.storage
-      .from('resumes')
-      .upload(filePath, resumeFile)
-
-    if (uploadError) {
-      toast.error('Failed to upload resume', { description: uploadError.message })
-      setIsUploading(false)
-      return
-    }
-
-    const { data: { publicUrl } } = supabase.storage.from('resumes').getPublicUrl(filePath)
-
-    const { error: requestError } = await supabase.from('requests').insert({
-      student_id: userId,
-      alumni_id: selectedAlumniForResume,
-      type: 'resume',
-      status: 'pending',
-      message: resumeMessage || 'Please review my resume.',
-      document_url: publicUrl
-    })
-
-    if (requestError) {
-      toast.error('Failed to submit resume review request', { description: requestError.message })
-    } else {
+    try {
+      const file = await storage.createFile(
+        process.env.NEXT_PUBLIC_RESUMES_BUCKET_ID || 'resumes',
+        ID.unique(),
+        resumeFile,
+      )
+      await tablesDB.createRow(
+        process.env.NEXT_PUBLIC_DATABASE_ID!,
+        'requests',
+        ID.unique(),
+        {
+          studentId: userId,
+          alumniId: selectedAlumniForResume,
+          type: 'resume',
+          status: 'pending',
+          message: resumeMessage || 'Please review my resume.',
+          documentUrl: file.$id,
+        },
+      )
       toast.success('Resume submitted successfully!')
       setResumeFile(null)
       setResumeMessage('')
       setSelectedAlumniForResume('')
+    } catch (error) {
+      toast.error('Failed to submit resume review request', {
+        description: error instanceof Error ? error.message : 'Please try again.',
+      })
     }
 
     setIsUploading(false)

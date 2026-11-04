@@ -1,8 +1,10 @@
 'use client'
 
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useSearchParams } from 'next/navigation'
-import { createClient } from '@/lib/supabase/client'
+import { client, tablesDB } from '@/lib/appwrite/client'
+import { APPWRITE_TABLE_IDS } from '@/lib/appwrite/tables'
+import { ID, Query } from 'appwrite'
 import { Profile } from '@/types'
 import {
   Search,
@@ -49,7 +51,6 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
   const targetAlumniId = searchParams.get('alumniId')
   const targetConvId = searchParams.get('conversationId')
 
-  const supabase = useMemo(() => createClient(), [])
   const [connections, setConnections] = useState<ConnectedUser[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   const [activeConnection, setActiveConnection] = useState<ConnectedUser | null>(null)
@@ -71,46 +72,37 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
     const fetchConnections = async () => {
       setIsLoading(true)
       try {
-        const idField = userRole === 'alumni' ? 'alumni_id' : 'student_id'
-        const otherIdField = userRole === 'alumni' ? 'student_id' : 'alumni_id'
+        const idField = userRole === 'alumni' ? 'alumniId' : 'studentId'
+        const otherIdField = userRole === 'alumni' ? 'studentId' : 'alumniId'
 
         let connectedIds: string[]
         if (userRole === 'teacher') {
-          const { data: alumniUsers, error: alumniUsersError } = await supabase
-            .from('users')
-            .select('id')
-            .eq('role', 'alumni')
-
-          const { data: alumniProfiles, error: alumniProfilesError } = await supabase
-            .from('profiles')
-            .select('id, role')
-            .eq('role', 'alumni')
-
-          if (alumniUsersError && alumniProfilesError) {
-            throw alumniUsersError
-          }
-
-          connectedIds = [
-            ...(alumniUsers || []).map((user) => user.id),
-            ...(alumniProfiles || []).map((profile) => profile.id),
-          ]
-            .filter((id): id is string => Boolean(id))
-          connectedIds = Array.from(new Set(connectedIds))
+          const alumniProfiles = await tablesDB.listRows(
+            process.env.NEXT_PUBLIC_DATABASE_ID!,
+            'profiles',
+            [Query.equal('role', 'alumni')],
+          )
+          connectedIds = alumniProfiles.rows
+            .map((profile) => profile.userId as string)
+            .filter(Boolean)
         } else {
-          const { data: requests } = await supabase
-            .from('requests')
-            .select('*')
-            .eq(idField, userId)
-
-          const { data: sessions } = await supabase
-            .from('mentorship_sessions')
-            .select('*')
-            .eq(idField, userId)
+          const [requests, sessions] = await Promise.all([
+            tablesDB.listRows(
+              process.env.NEXT_PUBLIC_DATABASE_ID!,
+              'requests',
+              [Query.equal(idField, userId)],
+            ),
+            tablesDB.listRows(
+              process.env.NEXT_PUBLIC_DATABASE_ID!,
+              'mentorship_sessions',
+              [Query.equal(idField, userId)],
+            ),
+          ])
 
           connectedIds = Array.from(
             new Set([
-              ...(requests || []).map((r: any) => r[otherIdField]),
-              ...(sessions || []).map((s: any) => s[otherIdField]),
+              ...requests.rows.map((r) => r[otherIdField] as string),
+              ...sessions.rows.map((s) => s[otherIdField] as string),
               ...(targetAlumniId ? [targetAlumniId] : []),
             ])
           ).filter(Boolean)
@@ -122,41 +114,43 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
         }
 
         // Fetch profiles
-        let profiles: any[] = []
+        let profiles: Record<string, unknown>[] = []
         if (connectedIds.length > 0) {
-          const { data: userIdProfiles } = await supabase
-            .from('profiles')
-            .select('*')
-            .in('id', connectedIds)
-          profiles = userIdProfiles || []
+          const userIdProfiles = await tablesDB.listRows(
+            process.env.NEXT_PUBLIC_DATABASE_ID!,
+            'profiles',
+            [Query.equal('userId', connectedIds)],
+          )
+          profiles = userIdProfiles.rows
 
         }
 
         // Fetch existing conversations
-        const { data: conversations } = targetAlumniId || targetConvId
-          ? await supabase
-            .from('conversations')
-            .select('*')
-            .or(`${idField}.eq.${userId}`)
-          : { data: [] }
+        const conversations = targetAlumniId || targetConvId
+          ? await tablesDB.listRows(
+              process.env.NEXT_PUBLIC_DATABASE_ID!,
+              'conversations',
+              [Query.equal(idField, userId)],
+            )
+          : { rows: [] }
 
         // Fetch last message preview for each conversation
-        const convIds = (conversations || []).map((c) => c.id)
+        const convIds = conversations.rows.map((c) => c.$id)
         const lastMessagesMap = new Map<string, { content: string; time: string }>()
 
         if (convIds.length > 0) {
-          const { data: recentMsgs } = await supabase
-            .from('messages')
-            .select('conversation_id, content, created_at')
-            .in('conversation_id', convIds)
-            .order('created_at', { ascending: false })
-
-          if (recentMsgs) {
-            recentMsgs.forEach((m) => {
-              if (!lastMessagesMap.has(m.conversation_id)) {
-                lastMessagesMap.set(m.conversation_id, {
+          const recentMsgs = await tablesDB.listRows(
+            process.env.NEXT_PUBLIC_DATABASE_ID!,
+            'messages',
+            [Query.equal('conversationId', convIds), Query.orderDesc('$createdAt')],
+          )
+          if (recentMsgs.rows) {
+            recentMsgs.rows.forEach((m) => {
+              const conversationId = m.conversationId as string
+              if (!lastMessagesMap.has(conversationId)) {
+                lastMessagesMap.set(conversationId, {
                   content: m.content,
-                  time: m.created_at,
+                  time: m.$createdAt,
                 })
               }
             })
@@ -164,15 +158,22 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
         }
 
         const uniqueProfiles = Array.from(
-          new Map(profiles.map((p) => [p.user_id || p.id, p])).values(),
+          new Map(profiles.map((p) => [p.userId || p.user_id || p.id, p])).values(),
         )
         const list: ConnectedUser[] = uniqueProfiles.map((p) => {
-          const profile = { ...p, user_id: p.user_id || p.id }
-          const conv = conversations?.find((c) => c[otherIdField] === profile.user_id)
-          const lastMsg = conv?.id ? lastMessagesMap.get(conv.id) : undefined
+          const profile: Profile = {
+            user_id: String(p.userId || p.user_id || p.id || ''),
+            full_name: String(p.fullName || p.full_name || 'Unknown user'),
+            role: typeof p.role === 'string' ? p.role : undefined,
+            company: typeof p.company === 'string' ? p.company : undefined,
+            avatar_url: typeof p.avatarUrl === 'string' ? p.avatarUrl : undefined,
+            tech_skills: Array.isArray(p.techSkills) ? p.techSkills as string[] : [],
+          }
+          const conv = conversations.rows.find((c) => c[otherIdField] === profile.user_id)
+          const lastMsg = conv?.$id ? lastMessagesMap.get(conv.$id) : undefined
           return {
             profile,
-            conversationId: conv?.id,
+            conversationId: conv?.$id,
             lastMessage: lastMsg?.content,
             lastMessageTime: lastMsg?.time,
           }
@@ -208,48 +209,51 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
     }
 
     fetchConnections()
-  }, [supabase, userId, userRole, targetAlumniId, targetConvId])
+  }, [userId, userRole, targetAlumniId, targetConvId])
 
   // 2. Fetch messages & subscribe to Realtime channel
   useEffect(() => {
     if (!activeConnection?.conversationId) {
-      setMessages([])
       return
     }
 
     const conversationId = activeConnection.conversationId
 
     const fetchMessages = async () => {
-      const { data, error } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('conversation_id', conversationId)
-        .order('created_at', { ascending: true })
-
-      if (error) {
-        toast.error('Failed to load message history.')
-      } else {
-        setMessages(data || [])
+      try {
+        const result = await tablesDB.listRows(
+          process.env.NEXT_PUBLIC_DATABASE_ID!,
+          'messages',
+          [Query.equal('conversationId', conversationId), Query.orderAsc('$createdAt')],
+        )
+        setMessages(result.rows.map((message) => ({
+          id: message.$id,
+          conversation_id: message.conversationId,
+          sender_id: message.senderId,
+          content: message.content,
+          created_at: message.$createdAt,
+        })))
         scrollToBottom(false)
+      } catch {
+        toast.error('Failed to load message history.')
       }
     }
 
     fetchMessages()
 
     // Realtime channel subscription
-    const channelName = `realtime:messages:${conversationId}`
-    const channel = supabase
-      .channel(channelName)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'messages',
-          filter: `conversation_id=eq.${conversationId}`,
-        },
-        (payload) => {
-          const newMsg = payload.new as ChatMessage
+    const unsubscribe = client.subscribe(
+      [`tablesdb.${process.env.NEXT_PUBLIC_DATABASE_ID}.tables.${APPWRITE_TABLE_IDS.messages}.rows`],
+      (event) => {
+          const item = event.payload as Record<string, unknown>
+          if (item.conversationId !== conversationId || event.events.every((name) => !name.endsWith('.create'))) return
+          const newMsg: ChatMessage = {
+            id: String(item.$id),
+            conversation_id: String(item.conversationId),
+            sender_id: String(item.senderId),
+            content: String(item.content),
+            created_at: String(item.$createdAt),
+          }
           setMessages((prev) => {
             // Replace optimistic message if match found
             const hasOptimistic = prev.some(
@@ -264,17 +268,16 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
             return [...prev, newMsg]
           })
           scrollToBottom(true)
-        }
-      )
-      .subscribe()
+      },
+    )
 
     return () => {
-      supabase.removeChannel(channel)
+      unsubscribe()
     }
-  }, [activeConnection?.conversationId, supabase, scrollToBottom])
+  }, [activeConnection?.conversationId, scrollToBottom])
 
   // Select connection and ensure conversation exists in DB
-  const handleSelectConnection = async (conn: ConnectedUser) => {
+  async function handleSelectConnection(conn: ConnectedUser) {
     const currentConn = { ...conn }
 
     if (!currentConn.conversationId) {
@@ -282,28 +285,22 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
         const student_id = userRole === 'alumni' ? currentConn.profile.user_id : userId
         const alumni_id = userRole === 'alumni' ? userId : currentConn.profile.user_id
 
-        const { data: newConv, error } = await supabase
-          .from('conversations')
-          .insert({ student_id, alumni_id })
-          .select()
-          .single()
-
-        if (error) {
-          if (error.code === '23505') {
-            const { data: existing } = await supabase
-              .from('conversations')
-              .select('*')
-              .eq('student_id', student_id)
-              .eq('alumni_id', alumni_id)
-              .single()
-
-            if (existing) currentConn.conversationId = existing.id
-          } else {
-            throw error
-          }
-        } else if (newConv) {
-          currentConn.conversationId = newConv.id
-        }
+        const existing = await tablesDB.listRows(
+          process.env.NEXT_PUBLIC_DATABASE_ID!,
+          'conversations',
+          [
+            Query.equal('studentId', student_id),
+            Query.equal('alumniId', alumni_id),
+            Query.limit(1),
+          ],
+        )
+        const conversation = existing.rows[0] || await tablesDB.createRow(
+          process.env.NEXT_PUBLIC_DATABASE_ID!,
+          'conversations',
+          ID.unique(),
+          { studentId: student_id, alumniId: alumni_id },
+        )
+        currentConn.conversationId = conversation.$id
 
         setConnections((prev) =>
           prev.map((c) => (c.profile.user_id === currentConn.profile.user_id ? currentConn : c))
@@ -320,11 +317,7 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
           details: err && typeof err === 'object' && 'details' in err ? err.details : undefined,
         })
         toast.error('Could not start conversation.', {
-          description: message.includes('conversation_participants')
-            ? 'Run migration 09_remove_unused_participant_rls.sql in Supabase SQL Editor.'
-            : message.includes("alumni_id")
-              ? 'Run migration 07_repair_conversations_for_teacher_messaging.sql in Supabase SQL Editor.'
-            : message,
+          description: message,
         })
         return
       }
@@ -336,7 +329,7 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
   // 3. Send message with Optimistic UI updates
   const handleSendMessage = async (e?: React.FormEvent) => {
     e?.preventDefault()
-    if (!newMessage.trim() || !activeConnection?.conversationId) return
+    if (!newMessage.trim() || !activeConnection?.conversationId || !userId) return
 
     const content = newMessage.trim()
     const tempId = `optimistic-${Date.now()}`
@@ -368,24 +361,30 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
     )
 
     try {
-      const { data, error } = await supabase
-        .from('messages')
-        .insert({
-          conversation_id: conversationId,
-          sender_id: userId,
+      const data = await tablesDB.createRow(
+        process.env.NEXT_PUBLIC_DATABASE_ID!,
+        'messages',
+        ID.unique(),
+        {
+          conversationId,
+          senderId: userId,
+          studentId: userRole === 'alumni' ? activeConnection.profile.user_id : userId,
+          alumniId: userRole === 'alumni' ? userId : activeConnection.profile.user_id,
           content,
-        })
-        .select()
-        .single()
-
-      if (error) {
-        throw error
-      }
+        },
+      )
 
       // Replace optimistic message with confirmed row
       if (data) {
         setMessages((prev) =>
-          prev.map((m) => (m.id === tempId ? { ...data, isOptimistic: false } : m))
+          prev.map((m) => (m.id === tempId ? {
+            id: data.$id,
+            conversation_id: data.conversationId,
+            sender_id: data.senderId,
+            content: data.content,
+            created_at: data.$createdAt,
+            isOptimistic: false,
+          } : m))
         )
       }
     } catch (err) {

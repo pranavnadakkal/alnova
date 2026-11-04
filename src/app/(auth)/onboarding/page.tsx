@@ -1,8 +1,10 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { createClient } from '@/lib/supabase/client'
+import { account, tablesDB } from '@/lib/appwrite/client'
+import { syncRoleLabel } from '@/app/(auth)/actions'
+import { ID, Query } from 'appwrite'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import * as z from 'zod'
@@ -24,7 +26,6 @@ type FormData = z.infer<typeof onboardingSchema>
 
 export default function OnboardingPage() {
   const router = useRouter()
-  const supabase = useMemo(() => createClient(), [])
   const [isLoading, setIsLoading] = useState(false)
   const [userId, setUserId] = useState<string | null>(null)
   const [currentStep, setCurrentStep] = useState(1)
@@ -55,30 +56,31 @@ export default function OnboardingPage() {
 
   useEffect(() => {
     const checkUser = async () => {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) {
+      let user
+      try {
+        user = await account.get()
+      } catch {
         router.push('/login')
         return
       }
-      setUserId(user.id)
+      setUserId(user.$id)
 
-      let userIdProfile = await supabase
-        .from('profiles')
-        .select('id, role')
-        .eq('id', user.id)
-        .maybeSingle()
-
-      if (!userIdProfile.data && !userIdProfile.error) {
-        userIdProfile = await supabase
-          .from('profiles')
-          .select('user_id, role')
-          .eq('user_id', user.id)
-          .maybeSingle()
+      let profile
+      try {
+        const userProfiles = await tablesDB.listRows(
+          process.env.NEXT_PUBLIC_DATABASE_ID!,
+          'profiles',
+          [Query.equal('userId', user.$id)],
+        )
+        profile = userProfiles.rows[0]
+      } catch (error) {
+        toast.error('Unable to verify your profile', {
+          description: error instanceof Error ? error.message : 'Please try again.',
+        })
+        return
       }
 
-      const profile = userIdProfile.data
-
-      if (profile) {
+      if (profile?.role === 'student' || profile?.role === 'alumni' || profile?.role === 'teacher') {
         router.push(
           profile.role === 'alumni'
             ? '/alumni-dashboard'
@@ -89,7 +91,7 @@ export default function OnboardingPage() {
       }
     }
     checkUser()
-  }, [router, supabase])
+  }, [router])
 
   const nextStep = async () => {
     let fieldsToValidate: (keyof FormData)[] = []
@@ -122,117 +124,78 @@ export default function OnboardingPage() {
 
     setIsLoading(true)
 
+    try {
     const skillsArray = (data.tech_skills || '').split(',').map(s => s.trim()).filter(Boolean)
-
-    // 1. Insert/upsert into core profiles table
-    let profileError = (await supabase
-      .from('profiles')
-      .upsert({
-        user_id: userId,
-        full_name: data.full_name,
-        role: data.role,
-        bio: data.bio || null,
-        headline: data.job_role || (data.role === 'alumni' ? 'Alumni' : data.role === 'teacher' ? 'Teacher' : 'Student'),
-        linkedin_url: data.linkedin_url || null,
-      })
-    ).error
-
-    if (profileError?.message.includes("'user_id'")) {
-      profileError = (await supabase
-        .from('profiles')
-        .upsert({
-          id: userId,
-          full_name: data.full_name,
-          role: data.role,
-          bio: data.bio || null,
-          headline: data.job_role || (data.role === 'alumni' ? 'Alumni' : data.role === 'teacher' ? 'Teacher' : 'Student'),
-          linkedin_url: data.linkedin_url || null,
-        })
-      ).error
+    const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!
+    const profileResult = await tablesDB.listRows(databaseId, 'profiles', [
+      Query.equal('userId', userId),
+    ])
+    const profileData = {
+      userId,
+      fullName: data.full_name,
+      role: data.role,
+      bio: data.bio || null,
+      headline: data.job_role || (data.role === 'alumni' ? 'Alumni' : data.role === 'teacher' ? 'Teacher' : 'Student'),
+      linkedInUrl: data.linkedin_url || null,
     }
+    const profile = profileResult.rows[0]
+      ? await tablesDB.updateRow(databaseId, 'profiles', profileResult.rows[0].$id, profileData)
+      : await tablesDB.createRow(databaseId, 'profiles', ID.unique(), profileData)
+    const profileId = profile.userId || userId
 
-    if (profileError) {
-      toast.error(profileError.message)
-      setIsLoading(false)
-      return
-    }
-
-    const { error: roleError } = await supabase
-      .from('users')
-      .update({ role: data.role })
-      .eq('id', userId)
-
-    if (roleError) {
-      toast.error('Unable to save account role', { description: roleError.message })
-      setIsLoading(false)
-      return
-    }
-
-    // 2. Insert/upsert into role-specific tables
     if (data.role === 'alumni') {
-      const { error: alumniError } = await supabase
-        .from('alumni_profiles')
-        .upsert({
-          profile_id: userId,
-          company: data.company || null,
-          job_title: data.job_role || null,
-          industry: data.industry || null,
-          is_verified: true,
-        })
-
-      if (alumniError) {
-        toast.error('Unable to save alumni profile details', { description: alumniError.message })
-        setIsLoading(false)
-        return
+      const existing = await tablesDB.listRows(databaseId, 'alumni_profiles', [
+        Query.equal('profileId', profileId),
+      ])
+      const alumniData = {
+        profileId,
+        company: data.company || null,
+        jobTitle: data.job_role || null,
+        industry: data.industry || null,
+        isVerified: true,
+      }
+      if (existing.rows[0]) {
+        await tablesDB.updateRow(databaseId, 'alumni_profiles', existing.rows[0].$id, alumniData)
+      } else {
+        await tablesDB.createRow(databaseId, 'alumni_profiles', ID.unique(), alumniData)
       }
     } else if (data.role === 'student') {
-      const { error: studentError } = await supabase
-        .from('student_profiles')
-        .upsert({
-          profile_id: userId,
-          major: data.industry || null,
-          target_role: data.job_role || null,
-        })
-
-      if (studentError) {
-        toast.error('Unable to save student profile details', { description: studentError.message })
-        setIsLoading(false)
-        return
+      const existing = await tablesDB.listRows(databaseId, 'student_profiles', [
+        Query.equal('profileId', profileId),
+      ])
+      const studentData = {
+        profileId,
+        major: data.industry || null,
+        targetRoles: data.job_role ? [data.job_role] : [],
+      }
+      if (existing.rows[0]) {
+        await tablesDB.updateRow(databaseId, 'student_profiles', existing.rows[0].$id, studentData)
+      } else {
+        await tablesDB.createRow(databaseId, 'student_profiles', ID.unique(), studentData)
       }
     }
 
-    // 3. Link skills for students and alumni.
     if (data.role !== 'teacher') {
-      try {
-        for (const skillName of skillsArray) {
-          if (!skillName) continue
-          const { data: existingSkill } = await supabase
-            .from('skills')
-            .select('id')
-            .ilike('name', skillName)
-            .maybeSingle()
-
-          let skillId = existingSkill?.id
-          if (!skillId) {
-            const { data: newSkill } = await supabase
-              .from('skills')
-              .insert({ name: skillName })
-              .select('id')
-              .maybeSingle()
-            if (newSkill?.id) skillId = newSkill.id
-          }
-
-          if (skillId) {
-            await supabase
-              .from('profile_skills')
-              .upsert({ profile_id: userId, skill_id: skillId })
-          }
+      for (const skillName of skillsArray) {
+        const existingSkills = await tablesDB.listRows(databaseId, 'skills', [
+          Query.equal('name', skillName),
+        ])
+        const skill = existingSkills.rows[0]
+          || await tablesDB.createRow(databaseId, 'skills', ID.unique(), { name: skillName })
+        const existingLinks = await tablesDB.listRows(databaseId, 'profile_skills', [
+          Query.equal('profileId', profileId),
+          Query.equal('skillId', skill.$id),
+        ])
+        if (!existingLinks.rows.length) {
+          await tablesDB.createRow(databaseId, 'profile_skills', ID.unique(), {
+            profileId,
+            skillId: skill.$id,
+          })
         }
-      } catch (skillsErr) {
-        console.warn('Skills linking error (non-fatal):', skillsErr)
       }
     }
 
+    await syncRoleLabel()
     toast.success('Profile created successfully!')
     router.push(
       data.role === 'alumni'
@@ -241,6 +204,11 @@ export default function OnboardingPage() {
           ? '/announcements'
           : '/student-dashboard'
     )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to save your profile.'
+      toast.error('Profile creation failed', { description: message })
+      setIsLoading(false)
+    }
   }
 
   const stepLabels = selectedRole === 'teacher' ? ['Role', 'Details'] : ['Role', 'Details', 'Skills']

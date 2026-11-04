@@ -1,8 +1,9 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { createClient } from '@/lib/supabase/client'
+import { account, tablesDB } from '@/lib/appwrite/client'
+import { Query } from 'appwrite'
 import { Award, Clock3, Handshake, TrendingUp, Users } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
@@ -39,7 +40,6 @@ function getScore(performance: Omit<AlumniPerformance, 'score'>) {
 
 export default function TeacherDashboardPage() {
   const router = useRouter()
-  const supabase = useMemo(() => createClient(), [])
   const [alumni, setAlumni] = useState<AlumniPerformance[]>([])
   const [totalStudents, setTotalStudents] = useState(0)
   const [associatedStudentCount, setAssociatedStudentCount] = useState(0)
@@ -50,77 +50,55 @@ export default function TeacherDashboardPage() {
   useEffect(() => {
     const loadDashboard = async () => {
       setIsLoading(true)
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) {
+      let user
+      try {
+        user = await account.get()
+      } catch {
         router.push('/login')
         return
       }
+      const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!
 
-      const [{ data: userRecord }, profileResult] = await Promise.all([
-        supabase.from('users').select('role').eq('id', user.id).maybeSingle(),
-        supabase.from('profiles').select('role').eq('id', user.id).maybeSingle(),
+      const profileResult = await tablesDB.listRows(databaseId, 'profiles', [
+        Query.equal('userId', user.$id),
       ])
-      let profile = profileResult.data
-      if (!profile && !profileResult.error) {
-        profile = (await supabase.from('profiles').select('role').eq('user_id', user.id).maybeSingle()).data
-      }
-      const role = (userRecord as { role?: string } | null)?.role
-        || (profile as { role?: string } | null)?.role
+      const role = profileResult.rows[0]?.role
       if (role !== 'teacher') {
         router.push('/student-dashboard')
         return
       }
 
       const [studentsResult, alumniResult, requestsResult] = await Promise.all([
-        supabase.from('users').select('id', { count: 'exact', head: true }).eq('role', 'student'),
-        supabase.from('users').select('id').eq('role', 'alumni'),
-        supabase.from('requests').select('*'),
+        tablesDB.listRows(databaseId, 'profiles', [
+          Query.equal('role', 'student'),
+          Query.limit(1),
+        ]),
+        tablesDB.listRows(databaseId, 'profiles', [
+          Query.equal('role', 'alumni'),
+          Query.limit(5000),
+        ]),
+        tablesDB.listRows(databaseId, 'requests', [Query.limit(5000)]),
       ])
 
-      let requestData = requestsResult.data
-      let requestError = requestsResult.error
-      if (!requestError && requestData) {
-        requestData = requestData.map((request) => ({
-          ...request,
-          status: request.status || 'pending',
-        }))
-      }
-
-      if (studentsResult.error || alumniResult.error || requestError) {
-        const failedQuery = studentsResult.error || alumniResult.error || requestError
-        if (!failedQuery) throw new Error('Could not read dashboard data.')
-        throw new Error(`Could not read dashboard data: ${failedQuery.message}`)
-      }
-
-      const alumniUsers = (alumniResult.data || []) as { id: string }[]
-      const alumniIds = alumniUsers.map((entry) => entry.id)
-      let profiles: (AlumniRow & { id: string; user_id?: string })[] | null = null
-      let profilesError: { message: string } | null = null
-      if (alumniIds.length) {
-        const profileResult = await supabase
-          .from('profiles')
-          .select('id, full_name, role, avatar_url')
-          .in('id', alumniIds)
-        profiles = profileResult.data as (AlumniRow & { id: string; user_id?: string })[] | null
-        profilesError = profileResult.error
-      }
-      if (!profiles?.length && !profilesError && alumniIds.length) {
-        const linkedProfiles = await supabase
-          .from('profiles')
-          .select('user_id, full_name, role, avatar_url')
-          .in('user_id', alumniIds)
-        profiles = linkedProfiles.data as (AlumniRow & { id: string; user_id?: string })[] | null
-        profilesError = linkedProfiles.error
-      }
-      if (profilesError) throw profilesError
+      const alumniUsers = alumniResult.rows.map((profile) => ({
+        id: profile.userId || profile.$id,
+        full_name: profile.fullName || 'Alumni member',
+        role: profile.role,
+        avatar_url: profile.avatarUrl || null,
+        company: profile.company || null,
+        industry: profile.industry || null,
+      }))
+      const requestData = requestsResult.rows.map((request) => ({
+        id: request.$id,
+        student_id: request.studentId,
+        alumni_id: request.alumniId,
+        status: request.status || 'pending',
+      }))
 
       const profileMap = new Map(
-        ((profiles || []) as (AlumniRow & { id: string; user_id?: string })[]).map((entry) => [
-          entry.user_id || entry.id,
-          { ...entry, id: entry.user_id || entry.id },
-        ])
+        alumniUsers.map((entry) => [entry.id, entry])
       )
-      const requests = (requestData || []) as unknown as RequestRow[]
+      const requests = requestData as RequestRow[]
       const performances = alumniUsers.map(({ id }) => {
         const alumniRequests = requests.filter((request) => request.alumni_id === id)
         const associatedStudents = new Set(
@@ -148,7 +126,7 @@ export default function TeacherDashboardPage() {
         return { ...base, score: getScore(base) }
       }).sort((a, b) => b.score - a.score || b.associatedStudents - a.associatedStudents)
 
-      setTotalStudents(studentsResult.count || 0)
+      setTotalStudents(studentsResult.total)
       setAssociatedStudentCount(new Set(
         requests
           .filter((request) => activeStatuses.has(request.status) || request.status === 'completed')
@@ -161,7 +139,7 @@ export default function TeacherDashboardPage() {
     loadDashboard()
       .catch((loadError) => setError(loadError instanceof Error ? loadError.message : 'Unable to load dashboard.'))
       .finally(() => setIsLoading(false))
-  }, [router, supabase])
+  }, [router])
 
   if (isLoading) {
     return <div className="mx-auto h-64 max-w-6xl animate-pulse rounded-2xl bg-slate-200 dark:bg-slate-800" />

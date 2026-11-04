@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { createClient } from '@/lib/supabase/client'
+import { account } from '@/lib/appwrite/client'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import * as z from 'zod'
@@ -27,7 +27,6 @@ type ResetPasswordFormData = z.infer<typeof resetPasswordSchema>
 
 export default function ResetPasswordPage() {
   const router = useRouter()
-  const supabase = createClient()
   const [isLoading, setIsLoading] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const [showConfirm, setShowConfirm] = useState(false)
@@ -46,19 +45,27 @@ export default function ResetPasswordPage() {
     setIsLoading(true)
     setServerError(null)
     
-    const { error } = await supabase.auth.updateUser({
-      password: data.password
-    })
-
-    if (error) {
-      setServerError(error.message)
-      toast.error(error.message)
+    const searchParams = new URLSearchParams(window.location.search)
+    const userId = searchParams.get('userId')
+    const secret = searchParams.get('secret')
+    if (!userId || !secret) {
+      const message = 'This password reset link is invalid or has expired.'
+      setServerError(message)
+      toast.error(message)
       setIsLoading(false)
       return
     }
 
-    toast.success('Password updated successfully!')
-    router.push('/login')
+    try {
+      await account.updateRecovery(userId, secret, data.password)
+      toast.success('Password updated successfully!')
+      router.push('/login')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to update password.'
+      setServerError(message)
+      toast.error(message)
+      setIsLoading(false)
+    }
   }
 
   return (

@@ -1,8 +1,10 @@
 'use client'
 
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
-import { createClient } from '@/lib/supabase/client'
+import { clearAppwriteSession } from '@/app/(auth)/actions'
+import { account, tablesDB, storage } from '@/lib/appwrite/client'
+import { ID, Query } from 'appwrite'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import * as z from 'zod'
@@ -30,7 +32,6 @@ const profileSchema = z.object({
 
 export default function ProfilePage() {
   const router = useRouter()
-  const supabase = useMemo(() => createClient(), [])
   
   const [userId, setUserId] = useState<string | null>(null)
   const [profileRecordId, setProfileRecordId] = useState<string | null>(null)
@@ -53,64 +54,58 @@ export default function ProfilePage() {
   useEffect(() => {
     const fetchProfile = async () => {
       setIsFetching(true)
-      const { data: { user }, error: authError } = await supabase.auth.getUser()
-      if (authError) {
-        setError(authError.message)
+      let user
+      try {
+      user = await account.get()
+      } catch {
+      router.push('/login')
+      return
+      }
+      setUserId(user.$id)
+
+      try {
+      const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!
+      const profiles = await tablesDB.listRows(databaseId, 'profiles', [
+        Query.equal('userId', user.$id),
+      ])
+      const profile = profiles.rows[0]
+      if (!profile) {
+        setError('Unable to load your profile. Please refresh the page.')
         setIsFetching(false)
         return
       }
-      if (!user) {
-        router.push('/login')
-        return
-      }
-      setUserId(user.id)
-      
-      const { data: userData, error: userError } = await supabase.from('users').select('role').eq('id', user.id).single()
-      if (userData) {
-        setUserType(userData.role)
-      }
-
-      let { data: profile, error: profileError } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', user.id)
-        .maybeSingle()
-      if (!profile && !profileError) {
-        const linkedProfile = await supabase
-          .from('profiles')
-          .select('*')
-          .eq('user_id', user.id)
-          .maybeSingle()
-        profile = linkedProfile.data
-        profileError = linkedProfile.error
-      }
-
-      if (profileError || !profile) setError('Unable to load your profile. Please refresh the page.')
+      setProfileRecordId(profile.$id)
+      const role = profile.role === 'alumni' ? 'alumni' : 'student'
+      setUserType(role)
+      const details = await tablesDB.listRows(
+        databaseId,
+        role === 'alumni' ? 'alumni_profiles' : 'student_profiles',
+        [Query.equal('profileId', user.$id)],
+      )
+      const roleDetails = details.rows[0]
       if (profile) {
-        setProfileRecordId(profile.id)
-        if (userError) {
-          setUserType(profile.role === 'alumni' ? 'alumni' : 'student')
-        }
         reset({
-          full_name: profile.full_name,
+          full_name: profile.fullName || '',
           bio: profile.bio || '',
-          company: profile.company || '',
-          job_role: profile.role || '',
-          industry: profile.industry || '',
-          tech_skills: profile.tech_skills?.join(', ') || '',
-          linkedin_url: profile.linkedin_url || '',
-          graduation_year: profile.graduation_year || undefined,
-          target_roles: profile.target_roles?.join(', ') || '',
+          company: roleDetails?.company || profile.company || '',
+          job_role: roleDetails?.jobTitle || profile.headline || '',
+          industry: roleDetails?.industry || profile.industry || '',
+          tech_skills: profile.techSkills?.join(', ') || '',
+          linkedin_url: profile.linkedInUrl || '',
+          graduation_year: roleDetails?.graduationYear || profile.graduationYear || undefined,
+          target_roles: roleDetails?.targetRoles?.join(', ') || profile.targetRoles?.join(', ') || '',
         })
-        if (profile.avatar_url) {
-          setAvatarUrl(profile.avatar_url)
-        }
+        if (profile.avatarUrl) setAvatarUrl(profile.avatarUrl)
+      }
+      } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : 'Unable to load your profile.'
+      setError(message)
       }
       setIsFetching(false)
     }
     
     fetchProfile()
-  }, [router, supabase, reset])
+  }, [router, reset])
 
   const onSubmit = async (data: z.infer<typeof profileSchema>) => {
     if (!userId) return
@@ -121,26 +116,48 @@ export default function ProfilePage() {
     const skillsArray = data.tech_skills.split(',').map(s => s.trim()).filter(Boolean)
     const targetRolesArray = data.target_roles ? data.target_roles.split(',').map(s => s.trim()).filter(Boolean) : []
 
-    const { error: profileError } = await supabase
-      .from('profiles')
-      .update({
-        full_name: data.full_name,
-        bio: data.bio,
-        company: data.company,
-        role: data.job_role,
+    try {
+      const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!
+      await tablesDB.updateRow(databaseId, 'profiles', profileRecordId || userId, {
+        fullName: data.full_name,
+        bio: data.bio || null,
+        company: data.company || null,
+        headline: data.job_role || null,
         industry: data.industry,
-        tech_skills: skillsArray,
-        linkedin_url: data.linkedin_url || null,
-        graduation_year: data.graduation_year || null,
-        target_roles: targetRolesArray.length > 0 ? targetRolesArray : null,
+        techSkills: skillsArray,
+        linkedInUrl: data.linkedin_url || null,
+        graduationYear: data.graduation_year || null,
+        targetRoles: targetRolesArray,
       })
-      .eq('id', profileRecordId || userId)
-
-    if (profileError) {
-      setError(profileError.message)
-      toast.error('Failed to update profile', { description: profileError.message })
-    } else {
+      if (userType === 'alumni' || userType === 'student') {
+        const collectionId = userType === 'alumni' ? 'alumni_profiles' : 'student_profiles'
+        const detailResult = await tablesDB.listRows(databaseId, collectionId, [
+          Query.equal('profileId', userId),
+        ])
+        const details = userType === 'alumni'
+          ? {
+              profileId: userId,
+              company: data.company || null,
+              jobTitle: data.job_role || null,
+              industry: data.industry,
+            }
+          : {
+              profileId: userId,
+              major: data.industry,
+              graduationYear: data.graduation_year || null,
+              targetRoles: targetRolesArray,
+            }
+        if (detailResult.rows[0]) {
+          await tablesDB.updateRow(databaseId, collectionId, detailResult.rows[0].$id, details)
+        } else {
+          await tablesDB.createRow(databaseId, collectionId, ID.unique(), details)
+        }
+      }
       toast.success('Profile updated successfully!')
+    } catch (profileError) {
+      const message = profileError instanceof Error ? profileError.message : 'Unable to update profile.'
+      setError(message)
+      toast.error('Failed to update profile', { description: message })
     }
     
     setIsLoading(false)
@@ -162,36 +179,19 @@ export default function ProfilePage() {
     }
 
     setIsUploadingAvatar(true)
-    const fileExt = file.name.split('.').pop()
-    const filePath = `${userId}/avatar.${fileExt}`
-
-    // Upload to Supabase Storage
-    const { error: uploadError } = await supabase.storage
-      .from('avatars')
-      .upload(filePath, file, { upsert: true })
-
-    if (uploadError) {
-      toast.error('Upload failed', { description: uploadError.message })
-      setIsUploadingAvatar(false)
-      return
-    }
-
-    const { data: { publicUrl } } = supabase.storage.from('avatars').getPublicUrl(filePath)
-
-    // Add cache-busting query param so the browser shows the new image
-    const urlWithCacheBust = `${publicUrl}?t=${Date.now()}`
-
-    // Update profile in DB
-    const { error: updateError } = await supabase
-      .from('profiles')
-      .update({ avatar_url: urlWithCacheBust })
-      .eq('id', profileRecordId || userId)
-
-    if (updateError) {
-      toast.error('Failed to save avatar', { description: updateError.message })
-    } else {
+    try {
+      const bucketId = process.env.NEXT_PUBLIC_AVATARS_BUCKET_ID || 'avatars'
+      const uploaded = await storage.createFile(bucketId, ID.unique(), file)
+      const urlWithCacheBust = `${storage.getFileView(bucketId, uploaded.$id).toString()}?t=${Date.now()}`
+      await tablesDB.updateRow(process.env.NEXT_PUBLIC_DATABASE_ID!, 'profiles', profileRecordId || userId, {
+        avatarUrl: urlWithCacheBust,
+      })
       setAvatarUrl(urlWithCacheBust)
       toast.success('Profile photo updated!')
+    } catch (uploadError) {
+      toast.error('Failed to save avatar', {
+        description: uploadError instanceof Error ? uploadError.message : 'Please try again.',
+      })
     }
     setIsUploadingAvatar(false)
     // Reset file input so the same file can be re-selected
@@ -202,25 +202,29 @@ export default function ProfilePage() {
     if (!userId) return
     setIsUploadingAvatar(true)
 
-    const { error: updateError } = await supabase
-      .from('profiles')
-      .update({ avatar_url: null })
-      .eq('id', profileRecordId || userId)
-
-    if (updateError) {
-      toast.error('Failed to remove photo', { description: updateError.message })
-    } else {
+    try {
+      await tablesDB.updateRow(process.env.NEXT_PUBLIC_DATABASE_ID!, 'profiles', profileRecordId || userId, {
+        avatarUrl: null,
+      })
       setAvatarUrl(null)
       toast.success('Profile photo removed')
+    } catch (updateError) {
+      toast.error('Failed to remove photo', {
+        description: updateError instanceof Error ? updateError.message : 'Please try again.',
+      })
     }
     setIsUploadingAvatar(false)
   }
 
   const handleSignOut = async () => {
     setIsSigningOut(true)
-    const { error } = await supabase.auth.signOut()
-    if (error) {
-      toast.error('Failed to sign out', { description: error.message })
+    try {
+      await account.deleteSession('current')
+      await clearAppwriteSession()
+    } catch (error) {
+      toast.error('Failed to sign out', {
+        description: error instanceof Error ? error.message : 'Please try again.',
+      })
       setIsSigningOut(false)
       return
     }
