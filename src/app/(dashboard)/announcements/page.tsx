@@ -135,6 +135,8 @@ export default function AnnouncementsPage() {
 
   // Realtime subscription for new announcements
   useEffect(() => {
+    if (!userId) return
+
     const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!
     const unsubscribe = client.subscribe(
       [`tablesdb.${databaseId}.tables.${APPWRITE_TABLE_IDS.announcements}.rows`],
@@ -176,7 +178,7 @@ export default function AnnouncementsPage() {
       },
     )
     return () => unsubscribe()
-  }, [])
+  }, [userId])
 
   const isTeacher = userRole === 'teacher'
 
@@ -201,7 +203,8 @@ export default function AnnouncementsPage() {
         return
       }
       try {
-        const bucketId = process.env.NEXT_PUBLIC_ANNOUNCEMENT_POSTERS_BUCKET_ID || 'announcement-posters'
+        const bucketId = process.env.NEXT_PUBLIC_APPWRITE_POSTERS_BUCKET_ID!
+        console.log("Bucket ID being used:", process.env.NEXT_PUBLIC_APPWRITE_POSTERS_BUCKET_ID)
         const uploaded = await storage.createFile(bucketId, ID.unique(), posterFile)
         uploadedPosterUrl = storage.getFileView(bucketId, uploaded.$id).toString()
       } catch (uploadError) {

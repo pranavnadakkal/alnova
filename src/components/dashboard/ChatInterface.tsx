@@ -214,7 +214,7 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
 
   // 2. Fetch messages & subscribe to Realtime channel
   useEffect(() => {
-    if (!activeConnection?.conversationId) {
+    if (!userId || !activeConnection?.conversationId) {
       return
     }
 
@@ -275,7 +275,7 @@ export default function ChatInterface({ userId, userRole }: ChatInterfaceProps) 
     return () => {
       unsubscribe()
     }
-  }, [activeConnection?.conversationId, scrollToBottom])
+  }, [userId, activeConnection?.conversationId, scrollToBottom])
 
   // Select connection and ensure conversation exists in DB
   async function handleSelectConnection(conn: ConnectedUser) {

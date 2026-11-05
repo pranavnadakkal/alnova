@@ -81,9 +81,17 @@ export default function LoginPage() {
         if (cancelled) return
         await finishLogin()
       } catch (error) {
-        if (error instanceof AppwriteException && error.code === 401) return
+        if (cancelled) return
+
+        if (error instanceof AppwriteException && error.code === 401) {
+          localStorage.removeItem('cookieFallback')
+          setIsLoading(false)
+          return
+        }
+
         if (!cancelled) {
           setServerError(error instanceof Error ? error.message : 'Unable to resume your session.')
+          setIsLoading(false)
         }
       }
     }
