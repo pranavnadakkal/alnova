@@ -201,7 +201,7 @@ export default function AnnouncementsPage() {
         return
       }
       try {
-        const bucketId = process.env.NEXT_PUBLIC_ANNOUNCEMENT_POSTERS_BUCKET_ID || 'announcement-posters'
+        const bucketId = process.env.NEXT_PUBLIC_APPWRITE_POSTERS_BUCKET_ID || process.env.NEXT_PUBLIC_ANNOUNCEMENT_POSTERS_BUCKET_ID || 'announcement-posters'
         const uploaded = await storage.createFile(bucketId, ID.unique(), posterFile)
         uploadedPosterUrl = storage.getFileView(bucketId, uploaded.$id).toString()
       } catch (uploadError) {

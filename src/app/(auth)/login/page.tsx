@@ -26,11 +26,19 @@ const loginSchema = z.object({
 
 type LoginFormData = z.infer<typeof loginSchema>
 
+function getStoredSessionToken() {
+  try {
+    const storedSessions = JSON.parse(localStorage.getItem('cookieFallback') || '{}') as Record<string, unknown>
+    const token = storedSessions[`a_session_${process.env.NEXT_PUBLIC_APPWRITE_PROJECT_ID}`]
+    return typeof token === 'string' && token.length > 0 ? token : null
+  } catch {
+    return null
+  }
+}
+
 async function finishLogin() {
-  const localSession = JSON.parse(localStorage.getItem('cookieFallback') || '{}')[
-    `a_session_${process.env.NEXT_PUBLIC_APPWRITE_PROJECT_ID}`
-  ]
-  if (typeof localSession !== 'string') {
+  const localSession = getStoredSessionToken()
+  if (!localSession) {
     throw new Error('Unable to establish a secure app session. Please try again.')
   }
   await persistAppwriteSession(localSession)
@@ -74,6 +82,8 @@ export default function LoginPage() {
   })
 
   useEffect(() => {
+    if (!getStoredSessionToken()) return
+
     let cancelled = false
     const resumeSession = async () => {
       try {
@@ -99,23 +109,27 @@ export default function LoginPage() {
     setServerError(null)
 
     try {
-      try {
-        await account.get()
-        await account.deleteSession('current')
-      } catch (error) {
-        if (!(error instanceof AppwriteException) || error.code !== 401) {
-          throw error
+      const storedSession = getStoredSessionToken()
+      if (storedSession) {
+        let currentUser: Awaited<ReturnType<typeof account.get>> | null = null
+        try {
+          currentUser = await account.get()
+        } catch (error) {
+          if (!(error instanceof AppwriteException) || error.code !== 401) {
+            throw error
+          }
         }
+
+        if (currentUser?.email === data.email) {
+          toast.success('Successfully logged in!')
+          await finishLogin()
+          return
+        }
+
+        if (currentUser) await account.deleteSession('current')
       }
 
-      const currentUser = await account.get().catch((error: unknown) => {
-        if (error instanceof AppwriteException && error.code === 401) return null
-        throw error
-      })
-      if (currentUser?.email !== data.email) {
-        if (currentUser) await account.deleteSession('current')
-        await account.createEmailPasswordSession(data.email, data.password)
-      }
+      await account.createEmailPasswordSession(data.email, data.password)
 
       toast.success('Successfully logged in!')
       await finishLogin()
